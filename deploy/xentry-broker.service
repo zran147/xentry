@@ -6,7 +6,9 @@ Requires=libvirtd.service
 [Service]
 Type=simple
 User=root
-Group=root
+Group=xentry
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/opt/xentry-broker
 RuntimeDirectory=xentry
 RuntimeDirectoryMode=0750
 EnvironmentFile=-/etc/xentry/broker.env
@@ -17,8 +19,8 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/xentry /run/xentry
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
 UMask=0077
 
 [Install]

@@ -1,18 +1,24 @@
 [Unit]
 Description=xentry web app (unprivileged)
-After=network.target
+After=network.target xentry-broker.service
+Wants=xentry-broker.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/xentry
-EnvironmentFile=%h/xentry/.env
-ExecStart=%h/xentry/.venv/bin/uvicorn xentry.web.app:app --host 127.0.0.1 --port 8000
+User=xentry
+Group=xentry
+Environment=HOME=/var/lib/xentry
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/opt/xentry
+EnvironmentFile=/etc/xentry/app.env
+ExecStart=/opt/xentry/.venv/bin/uvicorn xentry.web.app:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=%h/xentry/var
+ProtectHome=yes
+ReadWritePaths=/var/lib/xentry
 UMask=0077
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

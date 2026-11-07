@@ -337,6 +337,12 @@ class BrokerRuntime:
         image = self._image_path(image_id)
         vm_dir = job_dir / role
         vm_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+        # The broker's umask keeps job directories private, but QEMU runs as
+        # xentry-vm and must traverse them to reach its own overlay/seed. Give
+        # execute-only access on the ancestors; the VM directory itself is
+        # chowned to the QEMU user below.
+        for parent in (self.data_dir, self.jobs_root, job_dir, vm_dir):
+            parent.chmod(parent.stat().st_mode | 0o001)
         overlay = vm_dir / f"{role}.qcow2"
         overlay.unlink(missing_ok=True)
         try:
