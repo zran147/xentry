@@ -1,0 +1,44 @@
+version: 1
+# Packages are baked into the images by scripts/build-images.sh. The runtime
+# artifact mirror serves only the PHP source, GitLab .deb, kernel .deb, and PoC
+# artifacts; it is not an apt repository.
+images:
+  ubuntu-24.04-target:
+    base_artifact: ubuntu-base-image
+    packages:
+      - apache2
+      - apache2-dev
+      - autoconf
+      - bison
+      - build-essential
+      - ca-certificates
+      - curl
+      - git
+      - libcurl4-openssl-dev
+      - libonig-dev
+      - libreadline-dev
+      - libsqlite3-dev
+      - libssl-dev
+      - libxml2-dev
+      - libzip-dev
+      - pkg-config
+      - re2c
+  ubuntu-24.04-dirtyfrag:
+    base_artifact: ubuntu-base-image
+    packages:
+      - build-essential
+      - ca-certificates
+      - curl
+      - gcc
+      - git
+      - libc6-dev
+      - make
+  ubuntu-24.04-attacker:
+    base_artifact: ubuntu-base-image
+    packages:
+      - ca-certificates
+      - curl
+      - git
+      - golang-go
+      - python3
+      - python3-requests

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<div id="job-data" data-job-id="{{ job.id }}" data-outcome="{{ job.outcome or '' }}" hidden></div>
+<section class="panel">
+  <div class="row">
+    <h1>Job {{ job.id[:12] }}</h1>
+    <a href="/" class="secondary button">New job</a>
+  </div>
+  <dl class="facts">
+    <dt>Target</dt><dd>{{ job.target_id }}</dd>
+    <dt>CVE</dt><dd>{{ job.cve_id or "pending" }}</dd>
+    <dt>State</dt><dd>{{ job.state }}</dd>
+    <dt>Verdict</dt><dd>{{ job.verdict or "not_run" }}</dd>
+    <dt>Authority</dt><dd>{{ job.authority or "pending" }}</dd>
+    <dt>Reason</dt><dd>{{ job.reason_code or "-" }}</dd>
+    <dt>Cleanup</dt><dd>{{ job.cleanup_state }}</dd>
+    <dt>Created</dt><dd>{{ job.created_at }}</dd>
+    <dt>Finished</dt><dd>{{ job.finished_at or "-" }}</dd>
+  </dl>
+  <button id="cancel-button" class="secondary" type="button">Cancel job</button>
+  <a class="secondary button" href="/api/jobs/{{ job.id }}/bundle">Audit bundle</a>
+  <p id="message" class="message" role="status"></p>
+</section>
+
+<section class="panel">
+  <h2>Steps</h2>
+  <table>
+    <thead><tr><th>#</th><th>Name</th><th>Step</th><th>State</th><th>Reason</th><th>Started</th><th>Finished</th></tr></thead>
+    <tbody id="steps-body">
+      {% for step in steps %}
+      <tr>
+        <td>{{ step.seq }}</td>
+        <td>{{ step.name }}</td>
+        <td>{{ step.step_id or "-" }}</td>
+        <td>{{ step.state }}</td>
+        <td>{{ step.reason_code or "-" }}</td>
+        <td>{{ step.started_at or "-" }}</td>
+        <td>{{ step.finished_at or "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Validation</h2>
+  {% if validations %}
+    {% for validation in validations %}
+    <dl class="facts">
+      <dt>Verdict</dt><dd>{{ validation.verdict }}</dd>
+      <dt>Authority</dt><dd>{{ validation.authority }}</dd>
+      <dt>Model</dt><dd>{{ validation.validator_model }}</dd>
+      <dt>Reason</dt><dd>{{ validation.reason_code or "-" }}</dd>
+      <dt>Nonce observed</dt><dd>{{ validation.runner_nonce_observed }}</dd>
+      <dt>Null actor observed nonce</dt><dd>{{ validation.null_actor_observed_nonce }}</dd>
+    </dl>
+    {% endfor %}
+  {% else %}
+  <p class="muted">No validation row yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Evidence</h2>
+  {% if artifacts %}
+  <ul>
+    {% for artifact in artifacts %}
+    <li>
+      <a href="/api/jobs/{{ job.id }}/evidence/{{ artifact.id }}">{{ artifact.kind }}</a>
+      <span class="muted">{{ artifact.sha256[:16] }} · {{ artifact.bytes }} bytes</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No recorded artifacts yet.</p>
+  {% endif %}
+</section>
+
+{% endblock %}

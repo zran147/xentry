@@ -1,0 +1,8 @@
+{
+  "artifact_sha256": "d88b6c3f7a3896f269c8b36ec9db4cdfad03446d5465c038951e02ecf28774f5",
+  "case_id": "invalid-no-cve",
+  "checks": [],
+  "target_id": null,
+  "text": "This page is about cooking pasta. No CVE, no versions, no exploit.",
+  "valid": false
+}

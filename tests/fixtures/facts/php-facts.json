@@ -1,0 +1,43 @@
+{
+  "artifact_sha256": "c60642d54b9747114077e27e573d25b98fbf4a2dec8062f34cb8e59e2de73c98",
+  "case_id": "php-facts",
+  "checks": [
+    {
+      "field": "cve_id",
+      "op": "equals",
+      "value": "CVE-2026-109618"
+    },
+    {
+      "field": "product",
+      "op": "contains",
+      "value": "php"
+    },
+    {
+      "field": "affected_range",
+      "op": "contains",
+      "value": "8.4.26"
+    },
+    {
+      "field": "version_evidence",
+      "op": "nonempty"
+    },
+    {
+      "field": "protocol",
+      "op": "equals",
+      "value": "http"
+    },
+    {
+      "field": "ports",
+      "op": "contains",
+      "value": 8088
+    },
+    {
+      "field": "auth_required",
+      "op": "equals",
+      "value": false
+    }
+  ],
+  "target_id": "php2shell",
+  "text": "CVE-2026-109618 / CVE-2026-109619\nPHP session.upload_progress OOM Use-After-Free Remote Code Execution\nAffected Versions: PHP 8.4.0 ~ 8.4.26\nSAPI: Apache mod_php\nAttack vector: POST multipart/form-data\nUsage: python3 exploit.py --host 127.0.0.1 --port 8088 --cmd 'id' --fetch /pwn.txt\n",
+  "valid": true
+}

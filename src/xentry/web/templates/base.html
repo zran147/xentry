@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>xentry</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">xentry</a>
+    <span class="subtitle">local CVE reproduction lab</span>
+    <button id="help-button" class="secondary" type="button">Help</button>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <dialog id="help-dialog">
+    <h2>What this is</h2>
+    <p>xentry runs a pinned CVE PoC inside a disposable target VM and, for remote PoCs, a separate attacker VM. It records runner facts and asks a separate model to assess them.</p>
+    <p>The verdict is an LLM assessment, not a deterministic proof and not a production risk assessment. The nonce value is never shown.</p>
+    <p>Link text and PoC text are sent to DeepSeek for extraction and validation. Do not submit client or sensitive material.</p>
+    <button id="help-close" class="secondary" type="button">Close</button>
+  </dialog>
+</body>
+</html>

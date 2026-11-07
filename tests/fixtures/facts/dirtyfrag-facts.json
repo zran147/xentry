@@ -1,0 +1,41 @@
+{
+  "artifact_sha256": "1241c8d8c2aa8c7e58d22886704c80a316304946925a2394f4f9ab19df9b6cf0",
+  "case_id": "dirtyfrag-facts",
+  "checks": [
+    {
+      "field": "cve_id",
+      "op": "equals",
+      "value": "CVE-2026-43500"
+    },
+    {
+      "field": "product",
+      "op": "contains_any",
+      "value": [
+        "linux",
+        "kernel"
+      ]
+    },
+    {
+      "field": "affected_range",
+      "op": "contains",
+      "value": "6.17.0-23"
+    },
+    {
+      "field": "version_evidence",
+      "op": "nonempty"
+    },
+    {
+      "field": "poc_context",
+      "op": "equals",
+      "value": "local"
+    },
+    {
+      "field": "build_strategy",
+      "op": "contains",
+      "value": "gcc"
+    }
+  ],
+  "target_id": "dirtyfrag",
+  "text": "Dirty Frag: Universal Linux LPE\nCVE-2026-43500 RxRPC Page-Cache Write vulnerability.\nTested on Ubuntu 24.04.4: 6.17.0-23-generic\nBuild: gcc -O0 -Wall -o exp exp.c -lutil\nRun: ./exp\n",
+  "valid": true
+}

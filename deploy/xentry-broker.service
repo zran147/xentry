@@ -1,0 +1,25 @@
+[Unit]
+Description=xentry root broker
+After=libvirtd.service
+Requires=libvirtd.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=xentry
+RuntimeDirectoryMode=0750
+EnvironmentFile=-/etc/xentry/broker.env
+ExecStart=/opt/xentry-broker/.venv/bin/python -m broker.main
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/xentry /run/xentry
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

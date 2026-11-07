@@ -1,0 +1,72 @@
+version: 1
+artifacts:
+  ubuntu-base-image:
+    kind: image
+    url: https://cloud-images.ubuntu.com/releases/24.04/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img
+    sha256: 04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
+    provenance: https://cloud-images.ubuntu.com/releases/24.04/release-20261017/SHA256SUMS
+    status: resolved
+  ubuntu-target-image:
+    kind: image
+    url: build://ubuntu-base-image+target
+    sha256: 654156976d36f03bd2078f283949950c01360a7b0e50b168817410ef6582140f
+    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-target; config/image-manifests.yaml;
+      libreadline-dev
+    status: resolved
+  ubuntu-dirtyfrag-image:
+    kind: image
+    url: build://ubuntu-base-image+dirtyfrag
+    sha256: a8fad0a9dfe403ec0163812c31950d0639730a40db75c512a50af2986496360e
+    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-dirtyfrag; config/image-manifests.yaml
+    status: resolved
+  ubuntu-attacker-image:
+    kind: image
+    url: build://ubuntu-base-image+attacker
+    sha256: 852e947cbad7102fdc3e56d9ced9ed1b35ea9eac696492a8e59cfc034db02690
+    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-attacker; config/image-manifests.yaml
+    status: resolved
+  php-8.4.26-src:
+    kind: package
+    url: https://www.php.net/distributions/php-8.4.26.tar.xz
+    sha256: 32a2de53862ad44ed4a5005244ce4f1b50c271e74dced215449a4443b40569f1
+    provenance: https://www.php.net/releases/index.php?json&version=8.4.26
+    status: resolved
+  gitlab-19.2.5-deb:
+    kind: package
+    url: https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/pool/main/g/gitlab-ce/gitlab-ce_19.2.5-ce.0_amd64.deb?download=1
+    sha256: d88005cd1ff3f47f52e72d4cdfb4830ae03e4ffed2f8c137d2ff2fdabe5c0dbc
+    provenance: https://packages.gitlab.com/gitlab/gitlab-ce/ubuntu/dists/noble/main/binary-amd64/Packages.gz
+    status: resolved
+  kernel-6.17.0-23:
+    kind: kernel
+    url: https://security.ubuntu.com/ubuntu/pool/main/l/linux-signed-hwe-6.17/linux-image-6.17.0-23-generic_6.17.0-23.23~24.04.1_amd64.deb
+    sha256: bf4dd0d202ce223878eed54b8f03cfcaa8162630ceed9b0428f1186eaf3ad74e
+    provenance: https://security.ubuntu.com/ubuntu/dists/noble-security/main/binary-amd64/Packages.gz
+    status: resolved
+  kernel-modules-6.17.0-23:
+    kind: kernel
+    url: https://archive.ubuntu.com/ubuntu/pool/main/l/linux-hwe-6.17/linux-modules-6.17.0-23-generic_6.17.0-23.23~24.04.1_amd64.deb
+    sha256: 101465bd48c827e0885a89712717b833313018fae22fd68a05a25029e4ea4f5f
+    provenance: https://archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/Packages.gz
+    status: resolved
+  poc-php2shell:
+    kind: poc
+    url: https://github.com/78ResearchLab/PHP2Shell-Full-Chain-Exploit/archive/167085410a9342fafbd1bd64f5006920dbc83b8e.tar.gz
+    commit: 167085410a9342fafbd1bd64f5006920dbc83b8e
+    sha256: a720b7c94df4782ffc4cdbdc679d1ae26318c2ceb39ce090f9967d76fc8e6b05
+    provenance: https://github.com/78ResearchLab/PHP2Shell-Full-Chain-Exploit/commit/167085410a9342fafbd1bd64f5006920dbc83b8e
+    status: resolved
+  poc-gitlab:
+    kind: poc
+    url: https://github.com/gagaltotal/CVE-2026-85706-gitlab-poc/archive/e275edcdd00dfd921c4b646f4a568a3a092a29a1.tar.gz
+    commit: e275edcdd00dfd921c4b646f4a568a3a092a29a1
+    sha256: b879a9cb2fab7abb6a963daf5e8d72905ac1ae53e226f3777ad0719cb64849f3
+    provenance: https://github.com/gagaltotal/CVE-2026-85706-gitlab-poc/commit/e275edcdd00dfd921c4b646f4a568a3a092a29a1
+    status: resolved
+  poc-dirtyfrag:
+    kind: poc
+    url: https://github.com/V4bel/dirtyfrag/archive/aab16fcada27142dd8ce8704906cf6736cf213b8.tar.gz
+    commit: aab16fcada27142dd8ce8704906cf6736cf213b8
+    sha256: 95fa7e3bcd4c1a8ddf2d4f341737cc708d80876bc3c5ff7850a17b73b2ecea43
+    provenance: https://github.com/V4bel/dirtyfrag/commit/aab16fcada27142dd8ce8704906cf6736cf213b8
+    status: resolved

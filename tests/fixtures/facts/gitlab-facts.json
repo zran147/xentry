@@ -1,0 +1,46 @@
+{
+  "artifact_sha256": "c62927eb5e76f184421eba3e07db5f8bae579108c781e023c1acca21ef7206da",
+  "case_id": "gitlab-facts",
+  "checks": [
+    {
+      "field": "cve_id",
+      "op": "equals",
+      "value": "CVE-2026-85706"
+    },
+    {
+      "field": "product",
+      "op": "contains",
+      "value": "gitlab"
+    },
+    {
+      "field": "affected_range",
+      "op": "contains",
+      "value": "19.2.5"
+    },
+    {
+      "field": "version_evidence",
+      "op": "nonempty"
+    },
+    {
+      "field": "protocol",
+      "op": "in",
+      "value": [
+        "http",
+        "https"
+      ]
+    },
+    {
+      "field": "poc_context",
+      "op": "equals",
+      "value": "remote"
+    },
+    {
+      "field": "build_strategy",
+      "op": "contains",
+      "value": "go"
+    }
+  ],
+  "target_id": "gitlab",
+  "text": "CVE-2026-85706\nGitLab CE/EE unauthenticated arbitrary file read vulnerability.\nAffected versions: GitLab CE/EE 18.7 - 19.1.7, 19.2.0 - 19.2.5.\nBuild: go build -o CVE-2026-85706 CVE-2026-85706.go\nRun: ./CVE-2026-85706 -u https://gitlab.example.com -f /etc/passwd\n",
+  "valid": true
+}

@@ -1,0 +1,11 @@
+# Placeholder AppArmor profile for the xentry-vm QEMU user.
+# DO NOT LOAD THIS FILE. Gate B must replace it with a host-specific, tested
+# profile and install it with scripts/install-apparmor.sh.
+#
+# The final profile must cover /usr/bin/qemu-system-x86_64 running as
+# xentry-vm, allow only the job image/overlay/ISO paths and the libvirt socket,
+# and deny host home, network, and arbitrary file access.
+
+profile xentry-vm /usr/bin/qemu-system-x86_64 flags=(attach_disconnected,mediate_deleted) {
+  # Gate B TODO: complete and test before loading.
+}

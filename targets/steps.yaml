@@ -1,0 +1,194 @@
+version: 1
+steps:
+  setup-php:
+    user: root
+    script: php2shell/setup.sh
+    timeout_s: 1800
+    params:
+    - mirror_url
+    - php_artifact_id
+    - php_sha256
+    required:
+    - mirror_url
+    - php_artifact_id
+    - php_sha256
+    sha256: ad7c2a33bbfd96915069ff3bf627ac20b24db020a12626345fb2d27842c9f864
+    tty: false
+  readiness-php:
+    user: xentry-guest
+    script: php2shell/readiness.sh
+    timeout_s: 300
+    params: []
+    required: []
+    sha256: 507ca7a13615b1a43af7b0520036af82001a06b5c61dca4756a221a4c79b7998
+    tty: false
+  build-poc-php:
+    user: xentry-guest
+    script: php2shell/build-poc.sh
+    timeout_s: 300
+    params:
+    - poc_archive
+    - poc_sha256
+    - poc_dir
+    required:
+    - poc_archive
+    - poc_sha256
+    - poc_dir
+    sha256: e895fb15016317daab885581fe91e86958e0961cf9ba2858b8ceab093cfec3d7
+    tty: false
+  run-poc-php:
+    user: xentry-guest
+    script: php2shell/run-poc.sh
+    timeout_s: 900
+    params:
+    - target_ip
+    - nonce_path
+    - poc_dir
+    - zif_offset
+    - dtor_offset
+    required:
+    - target_ip
+    - nonce_path
+    - poc_dir
+    sha256: cbb1a65bfbebb9bf17bd4885f89fbc7ad4faea8ca8533ee51cf701ff4f83c81f
+    tty: false
+  null-php:
+    user: xentry-guest
+    script: php2shell/null.sh
+    timeout_s: 120
+    params:
+    - target_ip
+    required:
+    - target_ip
+    sha256: 2812aa9de24a91e6c0034b91acb271814fe51e4a531d9897e43d0703888d8ba7
+    tty: false
+  setup-gitlab:
+    user: root
+    script: gitlab/setup.sh
+    timeout_s: 1800
+    params:
+    - mirror_url
+    - gitlab_artifact_id
+    - gitlab_sha256
+    required:
+    - mirror_url
+    - gitlab_artifact_id
+    - gitlab_sha256
+    sha256: c1a04ef4c9d769c6b0fca18de7d35a83b852fb55c4045931f9a297b7d592a164
+    tty: false
+  readiness-gitlab:
+    user: xentry-guest
+    script: gitlab/readiness.sh
+    timeout_s: 300
+    params: []
+    required: []
+    sha256: bfef6c6e6c35c8d9dc871b8b1d396e4e3b35bc73c89fa0cc6da716f8587493c8
+    tty: false
+  build-poc-gitlab:
+    user: xentry-guest
+    script: gitlab/build-poc.sh
+    timeout_s: 600
+    params:
+    - poc_archive
+    - poc_sha256
+    - poc_dir
+    required:
+    - poc_archive
+    - poc_sha256
+    - poc_dir
+    sha256: 7edd54e1a484a3815b7d6a936a39967027cb89432071c401794ecd1f17a4f7f5
+    tty: false
+  run-poc-gitlab:
+    user: xentry-guest
+    script: gitlab/run-poc.sh
+    timeout_s: 300
+    params:
+    - target_ip
+    - nonce_path
+    - poc_dir
+    required:
+    - target_ip
+    - nonce_path
+    - poc_dir
+    sha256: 658a093e86963e91b852f1b7b59629706eeb960bc0a7216fc0e57d0c924e1cce
+    tty: false
+  null-gitlab:
+    user: xentry-guest
+    script: gitlab/null.sh
+    timeout_s: 120
+    params:
+    - target_ip
+    required:
+    - target_ip
+    sha256: 8f6ef856f86ef2039b7c4c035620fcabe5be3f58128daf15770356a28f54e15a
+    tty: false
+  prefix-gitlab-nonce:
+    user: root
+    script: gitlab/prefix-nonce.sh
+    timeout_s: 30
+    params:
+    - nonce_path
+    required:
+    - nonce_path
+    sha256: b9739e5e4e25feccb22515af61ef3018aa2ac3b2202c6a774a59f2d1f62bbaa9
+    tty: false
+  setup-dirtyfrag:
+    user: root
+    script: dirtyfrag/setup.sh
+    timeout_s: 1200
+    params:
+    - mirror_url
+    - kernel_artifact_id
+    - kernel_sha256
+    - kernel_modules_artifact_id
+    - kernel_modules_sha256
+    required:
+    - mirror_url
+    - kernel_artifact_id
+    - kernel_sha256
+    - kernel_modules_artifact_id
+    - kernel_modules_sha256
+    sha256: e16bd9931ebd317fa89007fd3fa26c50ea412bae0c0fa7dce1061d68c74a9ef5
+    tty: false
+  readiness-dirtyfrag:
+    user: xentry-guest
+    script: dirtyfrag/readiness.sh
+    timeout_s: 300
+    params: []
+    required: []
+    sha256: 3afe7de605c3ba86d2e89ad3c792c6f8a052bafb17b4ff080cafffaf870c43b0
+    tty: false
+  build-poc-dirtyfrag:
+    user: xentry-guest
+    script: dirtyfrag/build-poc.sh
+    timeout_s: 300
+    params:
+    - poc_archive
+    - poc_sha256
+    - poc_dir
+    required:
+    - poc_archive
+    - poc_sha256
+    - poc_dir
+    sha256: 84e1f6391199ec4282fa05fb3c56db6e05caa41df0fd8e4a4ca50f99b5a0a94e
+    tty: false
+  run-poc-dirtyfrag:
+    user: xentry-guest
+    script: dirtyfrag/run-poc.sh
+    timeout_s: 600
+    params:
+    - nonce_path
+    - poc_dir
+    required:
+    - nonce_path
+    - poc_dir
+    sha256: bad88cb4b2b06ce5cf15a4c15abd43dfbe66bab9c99187d6dfcc1082b0449546
+    tty: true
+  null-dirtyfrag:
+    user: xentry-guest
+    script: dirtyfrag/null.sh
+    timeout_s: 60
+    params: []
+    required: []
+    sha256: 58f4608970872b7d3f289bc6b6ffcd02011c2883cc3b085798bc3d0f2153fda8
+    tty: false

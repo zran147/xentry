@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>Submit a CVE and PoC</h1>
+  <p class="muted">The V1 target set is fixed: PHP2Shell, GitLab, and Dirty Frag. The PoC must match the pinned target.</p>
+  <form id="submit-form" autocomplete="off">
+    <label for="cve-url">CVE link</label>
+    <input id="cve-url" name="cve_url" type="url" required placeholder="https://...">
+    <label for="poc-url">PoC link</label>
+    <input id="poc-url" name="poc_url" type="url" required placeholder="https://github.com/...">
+    <div class="actions">
+      <button id="check-button" type="button">Check links</button>
+      <button id="submit-button" type="submit" disabled>Start job</button>
+      <button id="preflight-button" type="button" class="secondary">Preflight</button>
+    </div>
+  </form>
+  <pre id="plan" class="plan" hidden></pre>
+  <p id="message" class="message" role="status"></p>
+</section>
+
+<section class="panel">
+  <h2>Jobs</h2>
+  {% if jobs %}
+  <table>
+    <thead><tr><th>ID</th><th>Target</th><th>State</th><th>Verdict</th><th>Authority</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td><a href="/jobs/{{ job.id }}">{{ job.id[:12] }}</a></td>
+        <td>{{ job.target_id }}</td>
+        <td>{{ job.state }}</td>
+        <td>{{ job.verdict or "not_run" }}</td>
+        <td>{{ job.authority or "pending" }}</td>
+        <td>{{ job.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No jobs yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

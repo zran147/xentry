@@ -1,0 +1,18 @@
+[Unit]
+Description=xentry web app (unprivileged)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/xentry
+EnvironmentFile=%h/xentry/.env
+ExecStart=%h/xentry/.venv/bin/uvicorn xentry.web.app:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/xentry/var
+UMask=0077
+
+[Install]
+WantedBy=default.target
