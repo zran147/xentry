@@ -68,7 +68,7 @@ PHP uses the trusted `http_probe`.
 
 1. Install libvirt/QEMU, nftables, AppArmor, cloud-init tooling, Python 3.12, and `uv`.
 2. Create the `xentry` app user and the `xentry-vm` QEMU user; configure libvirt to run QEMU as `xentry-vm`.
-3. Install `deploy/xentry-broker.service` (root, group `xentry`) and `deploy/xentry.service` (`User=xentry`). The app runs from `/opt/xentry` with `/etc/xentry/app.env`; the broker runs from `/opt/xentry-broker` with `/etc/xentry/broker.env`. The checked-in `deploy/apparmor/xentry-vm` is a placeholder; replace it with a tested host-specific profile and load it as root with `scripts/install-apparmor.sh <profile>`. The installer refuses the placeholder. See the deployment section in [README.md](../README.md#deployment-setup-ubuntu-2604) for packages, users, groups, directories, and commands.
+3. Install `deploy/xentry-broker.service` (root, group `xentry`) and `deploy/xentry.service` (`User=xentry`). The app runs from `/opt/xentry` with `/etc/xentry/app.env`; the broker runs from `/opt/xentry-broker` with `/etc/xentry/broker.env`. QEMU is confined by libvirt's AppArmor security driver, which generates a per-domain profile from the domain XML; set `security_driver = "apparmor"` in `/etc/libvirt/qemu.conf` and install the xentry deny rules as root with `scripts/install-apparmor.sh`. There is no static emulator profile to load. See the deployment section in [README.md](../README.md#deployment-setup-ubuntu-2604) for packages, users, groups, directories, and commands.
 4. Pin the artifact catalog, images, and step hashes, then run the three acceptance jobs on the deployment host.
 5. Verify nftables phase rules, AppArmor, `xentry-vm`, the root-owned capture/serial paths, and cleanup.
 

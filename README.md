@@ -53,7 +53,7 @@ XENTRY_DB_PATH="$PWD/var/instance/xentry.db" \
 uv run --env-file .env --extra app uvicorn xentry.web.app:app --host 127.0.0.1 --port 8000
 ```
 
-The production broker runs as root from `/opt/xentry-broker`; the app never joins `libvirt` and never receives guest SSH keys. nftables is applied by the production broker. AppArmor, nftables application, root-broker serial evidence, and the `xentry-vm` QEMU user are deployment-host checks. After installing the units and a tested AppArmor profile, run `scripts/verify_deployment.py` as root; it reports every required deployment-host check without changing host state.
+The production broker runs as root from `/opt/xentry-broker`; the app never joins `libvirt` and never receives guest SSH keys. nftables is applied by the production broker. AppArmor, nftables application, root-broker serial evidence, and the `xentry-vm` QEMU user are deployment-host checks. QEMU is confined by libvirt's AppArmor security driver, which generates a per-domain profile from the domain XML; there is no static emulator profile. After installing the units and the AppArmor deny drop-in, run `scripts/verify_deployment.py` as root; it reports every required deployment-host check without changing host state.
 
 ## Deployment setup (Ubuntu 26.04)
 
@@ -248,9 +248,80 @@ XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
 XENTRY_TARGETS_DIR=/opt/xentry/targets
 ```
 
+For the experimental tab, which asks a model to write the PoC instead of taking
+a PoC link, add a model as well. Any provider litellm speaks works; for a local
+`llama.cpp` server use the `openai/` prefix and point the base at its
+OpenAI-compatible endpoint:
+
+```text
+XENTRY_POC_MODEL=openai/qwen2.5-coder-7b-instruct
+XENTRY_POC_API_BASE=http://127.0.0.1:8080/v1
+XENTRY_POC_API_KEY=sk-local
+XENTRY_POC_ATTEMPTS=3
+```
+
+`llama.cpp` ignores the key, but litellm requires one to be present. With
+`XENTRY_POC_MODEL` empty the tab explains what to set and submits nothing.
+
 Keep the rest of `.env.example` values unless you change a budget or model.
-`XENTRY_ALLOWED_HOSTS` is the Host-header allowlist; add the hostname you use
-to reach the app. The app binds to `127.0.0.1` in the unit.
+An `nvd.nist.gov/vuln/detail/<CVE-ID>` link is resolved to the matching record
+on NVD's REST API before it is fetched, because the detail page is rendered in
+the browser: a plain GET of it returns the single-page-app shell for every
+path, with no CVE data in it. The API needs no browser and yields the
+description, CVSS metrics and affected-version configurations as fields.
+`XENTRY_NVD_API_KEY` is optional and raises NVD's rate limit from 5 requests
+per 30 seconds to 50; it is sent only to `services.nvd.nist.gov`, checked at
+every redirect hop. Any other CVE link is fetched exactly as given.
+
+There is no environment variable for the app's listen address: the bind lives
+in the unit, and a non-loopback bind is the drop-in below. `XENTRY_APP_PORT`
+and `XENTRY_APP_HOST` are read by nothing.
+
+`XENTRY_ALLOWED_HOSTS` is the Host-header allowlist; add every hostname or
+address you use to reach the app, without a port (the check compares the
+hostname only). `localhost`, `127.0.0.1`, and `::1` are always allowed. A
+missing entry is not a startup error: the app serves pages and then rejects
+every POST with `403 host_invalid`.
+
+`XENTRY_APP_HOST` in `.env.example` is not read by anything; the bind address
+lives in the unit's `ExecStart`, which defaults to `127.0.0.1`.
+
+#### Serving on a routable address
+
+The app has **no authentication**. The Host, Origin, CSRF, and JSON checks
+stop cross-site requests, not a direct client: any client that can reach the
+port may `GET /`, receive the token cookie, and `POST /api/jobs`. Submitting a
+job detonates a real exploit in a VM on this host, and the evidence API serves
+every stored artifact. Treat the listening socket as the access boundary.
+
+To serve on a routable address, override the bind with a drop-in rather than
+editing the shipped unit, name the address in the Host allowlist, and install
+the source allowlist:
+
+```bash
+sudo install -d -m 0755 /etc/systemd/system/xentry.service.d
+sudo tee /etc/systemd/system/xentry.service.d/10-bind.conf >/dev/null <<'UNIT'
+[Service]
+ExecStart=
+ExecStart=/opt/xentry/.venv/bin/uvicorn xentry.web.app:app --host 192.168.137.10 --port 8000
+UNIT
+sudo sed -i 's|^XENTRY_ALLOWED_HOSTS=.*|XENTRY_ALLOWED_HOSTS=192.168.137.10|' /etc/xentry/app.env
+sudo /opt/xentry/scripts/install-webfilter.sh <admin-ip> [<admin-ip>...]
+sudo systemctl daemon-reload && sudo systemctl restart xentry
+```
+
+`scripts/install-webfilter.sh` builds `table inet xentry_admin`, which accepts
+the app's port only from the addresses you list, accepts it on loopback, and
+drops it from everywhere else. The chain policy is `accept` and only that one
+port is filtered, so no other service can be locked out by it. The table is
+separate from the broker's `inet xentry`: that one hooks `forward` and is
+deleted and re-added on every job phase, while this one hooks `input` and the
+broker never touches it. The script also installs
+`xentry-webfilter.service` so the rules are re-applied on boot.
+
+Binding to the routable address alone means `127.0.0.1:8000` is no longer
+listening; reach the app at the address in the drop-in. Deleting the drop-in
+and running `daemon-reload` plus `restart xentry` returns the app to loopback.
 
 Create the broker-only environment file:
 
@@ -266,6 +337,12 @@ XENTRY_TARGETS_DIR=/opt/xentry-broker/targets
 XENTRY_APPLY_NFT=1
 XENTRY_START_MIRROR=1
 XENTRY_QEMU_USER=xentry-vm
+# Both provisioning channels. Each is reachable from a guest while it
+# provisions and is closed by lock_network before any PoC runs, so each is
+# opted into here rather than assumed. Without the first, every derived apt
+# target fails at provision; without the second, every ecosystem target does.
+XENTRY_START_APT_PROXY=1
+XENTRY_START_REGISTRY_PROXY=1
 EOF
 sudo chown root:root /etc/xentry/broker.env
 sudo chmod 0600 /etc/xentry/broker.env
@@ -291,7 +368,7 @@ socket is mode `0660` and owned by `root:xentry`. Verify:
 
 ```bash
 ls -l /run/xentry/broker.sock
-curl -fsS http://127.0.0.1:8000/api/system
+curl -fsS http://127.0.0.1:8000/api/system   # or the address in the bind drop-in
 ```
 
 The app is deliberately unauthenticated and loopback-only. Do not expose it to
@@ -299,18 +376,35 @@ the network. The CSRF token is request integrity, not a login account.
 
 ### 9. AppArmor and final deployment checks
 
-The checked-in `deploy/apparmor/xentry-vm` is a placeholder and must not be
-loaded. Complete and test a host-specific profile that covers
-`/usr/bin/qemu-system-x86_64`, the job image/overlay/seed paths, the libvirt
-socket, and the host serial/capture paths. Load it as root:
+QEMU confinement comes from libvirt's AppArmor security driver, not from a
+hand-written profile. With `security_driver = "apparmor"` (step 6), libvirtd
+runs virt-aa-helper and switches each domain's QEMU into a generated
+`libvirt-<uuid>` profile built from that domain's own XML, so the permitted
+overlay, seed ISO, serial log, and backing image are exactly this job's files.
+A profile attached to `/usr/bin/qemu-system-x86_64` is never entered in that
+configuration, so there is no static emulator profile to load.
+
+Confirm the driver is active and install the xentry deny rules:
 
 ```bash
-sudo aa-status
-sudo /opt/xentry/scripts/install-apparmor.sh /path/to/tested-xentry-vm-profile
+sudo virsh -r -c qemu:///system capabilities | grep -A2 '<secmodel>'
+sudo /opt/xentry/scripts/install-apparmor.sh
 ```
 
-`scripts/install-apparmor.sh` refuses the placeholder. Until a tested profile
-is loaded and the deployment checks pass, the VM boundary is not a completed
+The first command must list `apparmor` among the host security models; if it
+lists only `dac`, fix `security_driver` in step 6 before going further.
+
+`deploy/apparmor/local-libvirt-qemu` installs to
+`/etc/apparmor.d/local/abstractions/libvirt-qemu`, which the distro
+abstraction pulls into every generated domain profile. It only denies: app and
+broker state under `/etc/xentry`, `/run/xentry`, `/opt/xentry`, and the
+index/evidence/artifacts/mirror trees, plus writes to the pinned base images.
+The installer syntax-checks it before installing, because a bad rule here
+would break every VM on the host. Running domains keep their current profile,
+so the rules apply to domains started from then on.
+
+Until the deployment checks pass and a job has been observed with its QEMU
+enforcing under a `libvirt-<uuid>` profile, the VM boundary is not a completed
 Gate B claim.
 
 Run the read-only deployment verifier as root, pointing at the production
@@ -323,9 +417,15 @@ sudo .venv/bin/python scripts/verify_deployment.py \
   --images-manifest /var/lib/xentry/images/build-results.json
 ```
 
-It checks the users, broker socket/group, systemd units, AppArmor profile,
-`/var/lib/xentry` paths, manifests, KVM, and `virsh`. While a job is running,
-confirm nftables is in the locked phase:
+It checks the users, broker socket/group, systemd units, the libvirt AppArmor
+security model, the deny drop-in, the `libvirtd` and `virt-aa-helper`
+profiles, `/var/lib/xentry` paths, manifests, KVM, and `virsh`.
+
+The `apparmor qemu confinement` check is advisory while the host is idle
+(nothing is confined when no VM is running) and a required gate once a VM is
+up: it fails if any running QEMU is unconfined or in complain mode. Re-run the
+verifier during a job to exercise it, and confirm nftables is in the locked
+phase at the same time:
 
 ```bash
 sudo nft list table inet xentry
@@ -333,7 +433,8 @@ sudo nft list table inet xentry
 
 ### 10. First job
 
-Open `http://127.0.0.1:8000` and submit one of the pinned CVE/PoC pairs from
+Open `http://127.0.0.1:8000` (or the address in the bind drop-in) and submit
+one of the pinned CVE/PoC pairs from
 [`docs/operations.md`](docs/operations.md). The service logs show broker and
 job progress:
 

@@ -42,6 +42,7 @@ def create_job(
     cve_url: str = "",
     check_id: str | None = None,
     bundle_sha256: str | None = None,
+    kind: str = "job",
 ) -> tuple[str, str, Path]:
     job_id = _id()
     attempt_id = _id()
@@ -50,8 +51,18 @@ def create_job(
     timestamp = now()
     conn.execute(
         "INSERT INTO jobs(id, cve_id, target_id, poc_url, check_id, bundle_sha256, "
-        "created_at, attempt_dir) VALUES (?,?,?,?,?,?,?,?)",
-        (job_id, None, "pending", poc_url, check_id, bundle_sha256, timestamp, str(attempt_dir)),
+        "created_at, attempt_dir, kind) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            job_id,
+            None,
+            "pending",
+            poc_url,
+            check_id,
+            bundle_sha256,
+            timestamp,
+            str(attempt_dir),
+            kind,
+        ),
     )
     conn.execute(
         "INSERT INTO attempts(id, job_id, attempt_no, attempt_dir, started_at) "
@@ -135,10 +146,11 @@ def finish_step(
     *,
     state: str,
     reason_code: str | None = None,
+    detail: str | None = None,
 ) -> None:
     conn.execute(
-        "UPDATE job_steps SET state=?, finished_at=?, reason_code=? WHERE id=?",
-        (state, now(), reason_code, step_row_id),
+        "UPDATE job_steps SET state=?, finished_at=?, reason_code=?, detail=? WHERE id=?",
+        (state, now(), reason_code, (detail or None), step_row_id),
     )
     conn.commit()
     row = conn.execute(
@@ -170,10 +182,25 @@ def record_nonce(
     path: str,
     owner: str,
     mode: int,
+    replace: bool = False,
 ) -> None:
+    # One nonce per phase per attempt, enforced by the schema: placing a
+    # second one in a normal job would be a bug worth failing on. The
+    # experimental pipeline rewrites its PoC and re-places the real nonce for
+    # each try, so it asks for the replacement explicitly. Only the last
+    # digest is kept, which is the one the verdict rests on - an earlier
+    # attempt's nonce was by definition never observed, or it would have ended
+    # the job there.
+    conflict = (
+        " ON CONFLICT(attempt_id, phase) DO UPDATE SET nonce_id=excluded.nonce_id, "
+        "sha256=excluded.sha256, path=excluded.path, owner=excluded.owner, "
+        "mode=excluded.mode, created_at=excluded.created_at"
+        if replace
+        else ""
+    )
     conn.execute(
         "INSERT INTO nonces(nonce_id, job_id, attempt_id, phase, sha256, path, owner, mode, "
-        "created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "created_at) VALUES (?,?,?,?,?,?,?,?,?)" + conflict,
         (nonce_id, job_id, attempt_id, phase, sha256, path, owner, mode, now()),
     )
     conn.commit()
@@ -340,10 +367,38 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
 
 
 def list_jobs(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    # Jobs only. A rebuilt environment has no outcome by design and would
+    # otherwise sit here looking like a run that never finished.
     rows = conn.execute(
-        "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+        "SELECT * FROM jobs WHERE kind='job' ORDER BY created_at DESC LIMIT ?", (limit,)
     ).fetchall()
     return [_project_job(row) for row in rows]
+
+
+def list_environments(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Rebuilt environments that are still up."""
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE kind='environment' AND outcome IS NULL "
+        "ORDER BY created_at DESC"
+    ).fetchall()
+    return [_project_job(row) for row in rows]
+
+
+def list_experiments(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    """Experimental runs, which are kept off the job list on purpose."""
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE kind='experiment' ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [_project_job(row) for row in rows]
+
+
+def count_live_jobs(conn: sqlite3.Connection) -> int:
+    """Real jobs with no outcome yet, which is what blocks a restart."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs WHERE kind='job' AND outcome IS NULL"
+    ).fetchone()
+    return int(row["n"] if row is not None else 0)
 
 
 def list_steps(conn: sqlite3.Connection, job_id: str) -> list[dict[str, Any]]:
@@ -440,6 +495,67 @@ def request_cancel(conn: sqlite3.Connection, job_id: str) -> None:
     ).fetchone()
     if row is not None:
         _event(conn, str(row["id"]), "cancel_requested", {})
+
+
+# A job is held when the runner has written its held-VM record and no outcome
+# has been projected yet. cleanup_state is left alone: its CHECK constraint
+# admits only four values, and "pending" is in any case the truth during a hold,
+# because the teardown has not run.
+RELEASE_MARKER = "release"
+
+
+def held_release_path(conn: sqlite3.Connection, job_id: str) -> Path | None:
+    row = conn.execute("SELECT attempt_dir FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None or not row["attempt_dir"]:
+        return None
+    return Path(str(row["attempt_dir"])) / RELEASE_MARKER
+
+
+def is_release_requested(conn: sqlite3.Connection, job_id: str) -> bool:
+    path = held_release_path(conn, job_id)
+    return path is not None and path.exists()
+
+
+def request_release(conn: sqlite3.Connection, job_id: str) -> bool:
+    """Ask a held job to tear down now. False when the job is not held."""
+    row = conn.execute(
+        "SELECT 1 FROM jobs j JOIN artifacts a ON a.job_id=j.id "
+        "WHERE j.id=? AND j.outcome IS NULL AND a.kind='held_vms'",
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    path = held_release_path(conn, job_id)
+    if path is None:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(now(), encoding="utf-8")
+    return True
+
+
+def get_check(conn: sqlite3.Connection, check_id: str) -> dict[str, Any] | None:
+    # The jobs table keeps poc_url but not cve_url; the submitted CVE link is
+    # recorded on the link check that approved the job.
+    if not check_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM link_checks WHERE check_id=?", (check_id,)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_held_jobs(
+    conn: sqlite3.Connection, kind: str = "job"
+) -> list[dict[str, Any]]:
+    # Held by kind, so the experimental page shows its own VMs and the Running
+    # VMs page never mixes an unpinned experiment in with the jobs.
+    rows = conn.execute(
+        "SELECT DISTINCT j.* FROM jobs j JOIN artifacts a ON a.job_id=j.id "
+        "WHERE j.kind=? AND j.outcome IS NULL AND a.kind='held_vms' "
+        "ORDER BY j.created_at DESC",
+        (kind,),
+    ).fetchall()
+    return [_project_job(row) for row in rows]
 
 
 def is_cancel_requested(conn: sqlite3.Connection, job_id: str) -> bool:

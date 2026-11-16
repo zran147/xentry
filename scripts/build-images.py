@@ -17,6 +17,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 import yaml
@@ -27,6 +28,7 @@ DEFAULT_CATALOG = ROOT / "config" / "artifacts.yaml"
 DEFAULT_IMAGE_DIR = ROOT / "var" / "images"
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
 SAFE_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
+DISK_SIZE = "8G"
 MARKER = "XENTRY_IMAGE_BUILD_OK"
 
 
@@ -78,6 +80,15 @@ def validate(manifests: dict, catalog: dict) -> list[str]:
         if not packages or not isinstance(packages, list):
             errors.append(f"{name}: missing packages")
             continue
+        for kind in ("tarballs", "wheels"):
+            for entry in spec.get(kind) or []:
+                if not isinstance(entry, dict):
+                    errors.append(f"{name}: a {kind} entry is not a mapping")
+                    continue
+                if not str(entry.get("url", "")).startswith("https://"):
+                    errors.append(f"{name}: a {kind} entry has no https url")
+                if len(str(entry.get("sha256", ""))) != 64:
+                    errors.append(f"{name}: a {kind} entry has no sha256")
         for package in packages:
             if not isinstance(package, str) or not SAFE_PACKAGE.fullmatch(package):
                 errors.append(f"{name}: unsafe package name {package!r}")
@@ -110,12 +121,89 @@ def download(url: str, dest: Path, expected: str) -> None:
     print(f"verified base image: {dest}")
 
 
-def cloud_init(name: str, packages: list[str], work: Path) -> Path:
+def tarball_commands(tarballs: list[dict]) -> str:
+    """Unpack a digest-pinned tarball into the image.
+
+    Some runtimes are not in the archive at a usable version: noble ships
+    nodejs 18.19 and a current npm advisory needs 20 or later. nodejs.org
+    publishes a sha256 per tarball in SHASUMS256.txt, so the runtime pins the
+    way the Dirty Frag kernel does - the digest is checked here, in the build,
+    and the built image is itself pinned by digest afterwards.
+    """
+    steps = []
+    for entry in tarballs:
+        url = str(entry["url"])
+        digest = str(entry["sha256"])
+        prefix = str(entry.get("prefix") or "/usr/local")
+        archive = "/tmp/xentry-runtime" + Path(url).suffix
+        steps.append(
+            f"curl -fsSL --retry 3 -o {archive} {url}; "
+            f"echo '{digest}  {archive}' | sha256sum -c -; "
+            f"mkdir -p {prefix}; "
+            f"tar -C {prefix} --strip-components=1 -xf {archive}; "
+            f"rm -f {archive}; "
+        )
+    return "".join(steps)
+
+
+def wheel_commands(wheels: list[dict[str, Any]]) -> str:
+    """Install digest-pinned Python wheels into the image.
+
+    A PoC's own dependencies are not a per-job resolution. The attacker VM has
+    no network once the job locks it, so `build-poc-generic.sh` fails any PoC
+    whose imports are not already there - and the set those PoCs reach for is
+    small, shared and slow-moving. CVE-2026-56290's PoC needs requests and
+    colorama; the image carried only the first.
+
+    So the set is resolved once on the host, where `pip install --dry-run
+    --report` gives a sha256 and an exact URL per file, and listed here. pip
+    checks every digest itself under --require-hashes, so a wheel that does not
+    match fails the build rather than reaching an attacker VM. --no-deps is
+    safe because the list is a full closure, not a top-level ask.
+
+    --break-system-packages is deliberate: this is a disposable VM built from a
+    pinned image, there is nothing in it to break, and a venv would be invisible
+    to a PoC that simply runs `python3 exploit.py`.
+    """
+    if not wheels:
+        return ""
+    lines = "".join(
+        f"{entry['url']} --hash=sha256:{entry['sha256']}\n" for entry in wheels
+    )
+    return (
+        "cat > /tmp/xentry-wheels.txt <<'XENTRYWHEELS'\n"
+        f"{lines}"
+        "XENTRYWHEELS\n"
+        "pip3 install --no-cache-dir --no-deps --require-hashes "
+        "--break-system-packages -r /tmp/xentry-wheels.txt; "
+        "rm -f /tmp/xentry-wheels.txt; "
+    )
+
+
+def cloud_init(
+    name: str,
+    packages: list[str],
+    work: Path,
+    tarballs: list[dict] | None = None,
+    wheels: list[dict[str, Any]] | None = None,
+) -> Path:
     command = (
         "set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; "
         "apt-get update; "
-        "apt-get install -y --no-install-recommends " + " ".join(packages) + "; "
-        "apt-get clean; rm -rf /var/lib/apt/lists/*; "
+        # --no-upgrade, so a RELEASE-DAY base image stays on release-pocket
+        # versions. This install runs against the image's OWN sources, which
+        # are the live archive, so without it ca-certificates, curl and
+        # ubuntu-keyring would be upgraded to -updates builds and drag their
+        # dependencies with them - putting back exactly the mismatch the
+        # release-day pin exists to remove. These three are already present in
+        # an Ubuntu cloud image, so this is normally a no-op; where one is
+        # genuinely absent it is still installed.
+        "apt-get install -y --no-install-recommends --no-upgrade "
+        + " ".join(packages)
+        + "; "
+        + tarball_commands(tarballs or [])
+        + wheel_commands(wheels or [])
+        + "apt-get clean; rm -rf /var/lib/apt/lists/*; "
         f"echo {MARKER}"
     )
     user_data = {
@@ -152,7 +240,25 @@ def build_one(name: str, spec: dict, base: Path, out_dir: Path, work: Path) -> P
         ["qemu-img", "convert", "-O", "qcow2", str(base), str(image)],
         check=True,
     )
-    seed = cloud_init(name, list(spec["packages"]), work)
+    # Grown before boot, because a cloud image is sized for its own contents
+    # and not for ours. jammy's is 2.20GiB with 0.68GiB already used, and
+    # apt-get update over four components of jammy, jammy-updates and
+    # jammy-security filled it: the build died inside the guest with
+    # "No space left on device", cloud-init powered the VM off cleanly, and
+    # the only sign was a missing completion marker. focal fit with about
+    # 100MiB to spare, which is luck rather than a margin. cloud-init's
+    # growpart extends the root partition on first boot, so one size for every
+    # release makes a build depend on the manifest instead of on how tightly
+    # that release's publisher happened to pack its image. qcow2 stays sparse,
+    # so this costs nothing on disk.
+    subprocess.run(["qemu-img", "resize", str(image), DISK_SIZE], check=True)
+    seed = cloud_init(
+        name,
+        list(spec["packages"]),
+        work,
+        list(spec.get("tarballs") or []),
+        list(spec.get("wheels") or []),
+    )
     log = work / f"{name}-console.log"
     log.unlink(missing_ok=True)
     command = [
@@ -195,6 +301,19 @@ def build_one(name: str, spec: dict, base: Path, out_dir: Path, work: Path) -> P
     return final
 
 
+def record(report_path: Path, name: str, result: dict[str, object]) -> None:
+    """Merge one image's result into the build report, keeping the others."""
+    images: dict[str, dict[str, object]] = {}
+    if report_path.exists():
+        try:
+            images = json.loads(report_path.read_text(encoding="utf-8")).get("images", {})
+        except (json.JSONDecodeError, AttributeError):
+            images = {}
+    images[name] = result
+    report = {"generated_at": now_iso(), "images": images}
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifests", type=Path, default=DEFAULT_MANIFESTS)
@@ -234,29 +353,28 @@ def main() -> int:
     work = args.image_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
     artifacts = catalog["artifacts"]
-    results: dict[str, dict[str, object]] = {}
+    report_path = args.image_dir / "build-results.json"
     for name in selected:
         spec = images[name]
         base_spec = artifacts[spec["base_artifact"]]
-        base_path = args.image_dir / "ubuntu-24.04-base.img"
+        # Keyed by artifact: three releases have three different base images,
+        # and one shared filename would make each build overwrite the last.
+        base_path = args.image_dir / f"{spec['base_artifact']}.img"
         download(base_spec["url"], base_path, base_spec["sha256"])
         final = build_one(name, spec, base_path, args.image_dir, work)
-        results[name] = {
-            "path": str(final),
-            "sha256": sha256_file(final),
-            "bytes": final.stat().st_size,
-        }
-    report_path = args.image_dir / "build-results.json"
-    existing: dict[str, dict[str, object]] = {}
-    if report_path.exists():
-        try:
-            existing = json.loads(report_path.read_text(encoding="utf-8")).get("images", {})
-        except (json.JSONDecodeError, AttributeError):
-            existing = {}
-    existing.update(results)
-    report = {"generated_at": now_iso(), "images": existing}
-    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"build results written to {report_path}")
+        # Recorded per image rather than after the loop: build_one raises on a
+        # failed build, and a report written at the end would have discarded
+        # the digest of every image already built.
+        record(
+            report_path,
+            name,
+            {
+                "path": str(final),
+                "sha256": sha256_file(final),
+                "bytes": final.stat().st_size,
+            },
+        )
+        print(f"[{name}] recorded in {report_path}")
     print("Pin each image with scripts/pin-artifact.py --accept after reviewing the hash.")
     return 0
 

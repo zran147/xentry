@@ -14,14 +14,14 @@ def test_migration_creates_schema(tmp_path: Path) -> None:
     conn = init_db(tmp_path / "xentry.db")
     try:
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 1
+        assert version == 7
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         tables = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert {"jobs", "attempts", "job_steps", "nonces", "link_checks", "job_outcomes"} <= tables
-        assert migrate(conn) == 1
+        assert migrate(conn) == 7
     finally:
         conn.close()
 

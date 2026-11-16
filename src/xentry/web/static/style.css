@@ -7,6 +7,10 @@
   --line: #d9d9d3;
   --accent: #245c4a;
   --error: #a12a2a;
+  --run: #1f6f8b;
+  --ok: #2f6b3d;
+  --warn: #8a6516;
+  --raised: #00000008;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -17,6 +21,10 @@
     --line: #38413c;
     --accent: #7cc7a6;
     --error: #ff9b9b;
+    --run: #7fc3dd;
+    --ok: #8ed39c;
+    --warn: #e0b765;
+    --raised: #ffffff0a;
   }
 }
 * { box-sizing: border-box; }
@@ -48,8 +56,14 @@ main { width: min(1000px, 100%); margin: 24px auto; padding: 0 16px; }
 h1 { font-size: 1.4rem; margin: 0 0 8px; }
 h2 { font-size: 1.1rem; margin: 0 0 12px; }
 label { display: block; margin-top: 12px; font-weight: 600; }
-input {
+/* The textarea takes the same rule as the inputs so a URL field that happens
+   to hold several lines is not narrower than the one that holds one.
+   box-sizing, because a textarea's default content-box plus this padding
+   would overflow the card by 20px; and resize:vertical so a long URL can be
+   read without the field escaping the layout sideways. */
+input, textarea {
   width: 100%;
+  box-sizing: border-box;
   margin-top: 4px;
   padding: 9px 10px;
   border: 1px solid var(--line);
@@ -57,10 +71,22 @@ input {
   background: var(--bg);
   color: var(--text);
 }
+textarea {
+  font: inherit;
+  resize: vertical;
+  min-height: 5.5em;
+}
+input:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .actions, .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+.row { justify-content: space-between; }
 .row h1 { margin: 0; }
 button, .button {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 13px;
   border: 1px solid var(--accent);
   border-radius: 6px;
@@ -83,12 +109,14 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   border-radius: 6px;
   background: var(--bg);
   font-size: 13px;
+  max-height: 16em;
 }
 .message { min-height: 1.5em; margin: 12px 0 0; color: var(--muted); }
 .message.error { color: var(--error); }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
+tbody tr:nth-child(even) { background: var(--raised); }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 12px 0; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; }
@@ -101,7 +129,398 @@ dialog {
   padding: 20px;
 }
 dialog::backdrop { background: rgb(0 0 0 / 45%); }
+
+/* --- identifiers ------------------------------------------------------- */
+.mono, td .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .93em; }
+
+/* --- status pills ------------------------------------------------------ */
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.pill[data-status="running"] { color: var(--run); border-color: currentColor; }
+.pill[data-status="passed"], .pill[data-status="reproduced"] { color: var(--ok); border-color: currentColor; }
+.pill[data-status="failed"], .pill[data-status="error"] { color: var(--error); border-color: currentColor; }
+.pill[data-status="queued"], .pill[data-status="pending"] { color: var(--warn); border-color: currentColor; }
+.pill[data-status="cancelled"] { color: var(--muted); }
+
+/* --- step help --------------------------------------------------------- */
+/* A circled i beside a step name. Focusable, because `title` only ever shows
+   on hover and the keyboard would otherwise have no way to read it. */
+.stephelp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+  vertical-align: middle;
+}
+.stephelp:hover, .stephelp:focus-visible { color: var(--accent); }
+.stephelp:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The tooltip. A table cell is narrow and these are sentences, so it is
+   positioned against the row rather than the icon and given a fixed width. */
+td:has(> .stephelp) { position: relative; }
+.stephelp::after {
+  content: attr(data-help);
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: none;
+  width: min(34rem, 70vw);
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+  color: var(--text);
+  font-size: 12.5px;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+}
+.stephelp:hover::after, .stephelp:focus-visible::after { display: block; }
+/* Near the bottom of a long table the tooltip would open off-screen. */
+tbody tr:nth-last-child(-n + 3) .stephelp::after { top: auto; bottom: calc(100% + 6px); }
+
+/* --- progress --------------------------------------------------------- */
+.progress-region { margin-top: 16px; }
+.progress-region[hidden] { display: none; }
+.progress {
+  position: relative;
+  height: 6px;
+  margin: 10px 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+.progress::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 100%;
+  background: var(--accent);
+  transform: translateX(-100%);
+}
+.progress.indeterminate::after {
+  width: 40%;
+  background: var(--run);
+  animation: slide 1.25s ease-in-out infinite;
+}
+.progress.complete::after { transform: translateX(0); background: var(--ok); }
+.progress.failed::after { transform: translateX(0); background: var(--error); }
+@keyframes slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.progress-label {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+.progress-label .what { color: var(--text); font-weight: 600; }
+.elapsed { font-variant-numeric: tabular-nums; }
+
+/* --- spinner ---------------------------------------------------------- */
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+.spinner[hidden] { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- two-stage submit flow -------------------------------------------- */
+.stepper {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 4px;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  color: var(--muted);
+}
+.stepper li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.stepper li::before {
+  content: attr(data-n);
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--line);
+  color: var(--panel);
+  font-size: 11px;
+  font-weight: 700;
+}
+.stepper li.current { color: var(--text); border-color: var(--run); }
+.stepper li.current::before { background: var(--run); }
+.stepper li.done { color: var(--ok); border-color: currentColor; }
+.stepper li.done::before { content: "\2713"; background: var(--ok); }
+
+.urlcell a, .urlcell { word-break: break-all; }
+
+/* --- held VMs ---------------------------------------------------------- */
+.navlink { margin-left: auto; color: var(--accent); text-decoration: none; font-weight: 600; }
+.navlink + #help-button { margin-left: 12px; }
+.held {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 14px;
+  background: var(--raised);
+}
+.held .row { margin-top: 0; }
+.held h3 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 1rem; }
+.count {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 600;
+  text-align: center;
+}
+.cardtoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+.cardtoggle:hover { border-color: var(--line); }
+/* A triangle, so the state is visible without reading the label. */
+.caret {
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .12s ease;
+}
+.cardtoggle[aria-expanded="true"] .caret { transform: rotate(90deg); }
+.collapse-all { margin: 0; padding: 5px 10px; font-size: .85rem; }
+.cardbody[hidden] { display: none; }
+.copyable { margin-top: 10px; }
+.copyable .row.tight { margin: 0 0 2px; align-items: center; }
+.copyable pre.plan { margin-top: 0; }
+button.copy {
+  margin: 0;
+  padding: 2px 10px;
+  font-size: .8rem;
+  background: var(--raised);
+  color: var(--accent);
+  border: 1px solid var(--line);
+}
+button.copy.failed { color: var(--warn); }
+.rebuild { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.rebuild label { margin: 0 0 11px; }
+.rebuild select {
+  flex: 1 1 22em;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.rebuild select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ttl { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--warn); }
+
+/* --- collapsible sections --------------------------------------------- */
+details { margin: 8px 0; }
+summary {
+  cursor: pointer;
+  padding: 4px 0;
+  color: var(--accent);
+  font-weight: 600;
+}
+summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+details .plan { max-height: 28em; white-space: pre-wrap; word-break: break-word; }
+h3 { font-size: .98rem; margin: 16px 0 4px; }
+
+/* --- live step list --------------------------------------------------- */
+#steps-body tr.is-running { background: color-mix(in srgb, var(--run) 12%, transparent); }
+#steps-body tr.is-failed { background: color-mix(in srgb, var(--error) 10%, transparent); }
+.stale { opacity: .6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .progress.indeterminate::after { animation: none; width: 100%; transform: translateX(0); opacity: .55; }
+  .spinner { animation-duration: 2.5s; }
+}
 @media (max-width: 600px) {
   .topbar { padding: 12px 16px; }
   table { display: block; overflow-x: auto; }
+  .row { align-items: flex-start; }
 }
+
+/* --- provisioning commands, in a row under the provision step --------- */
+tr.expandable { cursor: pointer; }
+tr.expandable:hover > td { background: var(--raised); }
+/* A disclosure marker without extra markup. */
+tr.expandable td:first-child::before { content: "\25BE\00a0"; color: var(--muted); }
+tr.expandable[aria-expanded="false"] td:first-child::before { content: "\25B8\00a0"; }
+/* [hidden] has to beat display: table-row. */
+tr.step-detail[hidden] { display: none; }
+tr.step-detail > td {
+  padding: 0 8px 12px;
+  background: var(--raised);
+  /* A table cell grows to fit its content, so one unbreakable code line widens
+     the whole table instead of scrolling inside the block. max-width keeps the
+     cell from contributing its content width; the table's own width: 100% then
+     decides how wide it is, and the block below can finally overflow. */
+  max-width: 0;
+}
+
+/* An editor surface: dark in both themes, because that is what a code block
+   reads as, and the commands are code. */
+.cmdblock {
+  --code-font: ui-monospace, "SF Mono", Menlo, Consolas, "Droid Sans Mono", monospace;
+  --code-bg: #1e1e1e;
+  --code-fg: #d4d4d4;
+  --code-dim: #9a9a9a;
+  --code-gutter: #858585;
+  --code-edge: #333333;
+  --code-hover: #2a2d2e;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--code-edge);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--code-fg);
+}
+.cmdblock-title {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--code-edge);
+  background: #252526;
+  font: 12px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+}
+.cmdblock-title .name { color: #e7e7e7; font-family: var(--code-font); }
+.cmdblock-title .meta { color: var(--code-gutter); }
+.cmdlog {
+  margin: 0;
+  padding: 6px 0 6px 3.9em;
+  max-height: 24em;
+  /* min-width lets the scroller be narrower than its content, which is what
+     makes the horizontal bar appear at all. */
+  min-width: 0;
+  overflow: auto;
+  list-style: decimal;
+  font: 12.5px/1.6 var(--code-font);
+  tab-size: 4;
+  /* A bar that is always visible, rather than an overlay that fades out and
+     leaves the block looking like it just runs off the edge. */
+  scrollbar-width: thin;
+  scrollbar-color: #5a5a5a transparent;
+}
+.cmdlog::-webkit-scrollbar { width: 10px; height: 10px; }
+.cmdlog::-webkit-scrollbar-track { background: #1a1a1a; }
+.cmdlog::-webkit-scrollbar-thumb {
+  border: 2px solid #1e1e1e;
+  border-radius: 5px;
+  background: #5a5a5a;
+}
+.cmdlog::-webkit-scrollbar-thumb:hover { background: #7c7c7c; }
+.cmdlog::-webkit-scrollbar-corner { background: #1e1e1e; }
+/* white-space: pre plus overflow-x keeps long configure lines on one line and
+   scrollable, the way an editor does, instead of reflowing them. */
+.cmdlog li {
+  padding: 0 14px 0 6px;
+  border-left: 1px solid var(--code-edge);
+  color: var(--code-fg);
+  white-space: pre;
+}
+.cmdlog li::marker { color: var(--code-gutter); font-variant-numeric: tabular-nums; }
+.cmdlog li:hover { background: var(--code-hover); }
+/* A failure message: free text, so it wraps rather than scrolling sideways
+   forever, but it is still code-ish and still monospace. */
+.cmdtext {
+  margin: 0;
+  padding: 8px 12px;
+  max-height: 20em;
+  min-width: 0;
+  overflow: auto;
+  color: var(--code-fg);
+  font: 12.5px/1.6 var(--code-font);
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: #5a5a5a transparent;
+}
+.cmdtext::-webkit-scrollbar { width: 10px; height: 10px; }
+.cmdtext::-webkit-scrollbar-track { background: #1a1a1a; }
+.cmdtext::-webkit-scrollbar-thumb {
+  border: 2px solid #1e1e1e;
+  border-radius: 5px;
+  background: #5a5a5a;
+}
+
+/* A plan is what will run, so it is dimmed and nothing is active. */
+/* Dimmed, but never italic: it is code. */
+.cmdlog.planned li { color: var(--code-dim); }
+
+@media (prefers-reduced-motion: reduce) {
+  .progress.indeterminate::after { animation: none; width: 100%; transform: translateX(0); opacity: .55; }
+  .spinner { animation-duration: 2.5s; }
+}
+@media (max-width: 600px) {
+  .topbar { padding: 12px 16px; }
+  table { display: block; overflow-x: auto; }
+  .row { align-items: flex-start; }
+}
+
+/* Evidence opens in the browser; these are the alternatives to that. */
+.evidence-actions { font-size: 12px; }
+.evidence-actions a { color: var(--muted); }
+.evidence-actions a:hover { color: var(--accent); }
+.evidence-actions a + a::before { content: " \00b7 "; color: var(--line); }

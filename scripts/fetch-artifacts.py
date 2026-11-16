@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from xentry.artifact_tools import download_to, now_iso, validate_sha256
+from xentry.artifact_tools import download_to, hash_file, now_iso, validate_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG = ROOT / "config" / "artifacts.yaml"
@@ -58,7 +58,28 @@ def main() -> int:
         if artifact.get("status") != "resolved":
             errors.append(f"{name}: status is unresolved (Gate G)")
         url = str(artifact.get("url", ""))
-        if not url or url.startswith("build://") or artifact.get("kind") == "image":
+        if not url or artifact.get("kind") == "image":
+            continue
+        if url.startswith("build://"):
+            # Built here rather than fetched: an npm closure, say. There is
+            # nothing to download, but the broker resolves copy_in against this
+            # manifest, so a bundle that is on disk and matches its pin has to
+            # appear in it or the job fails with "unknown artifact_id" long
+            # after the operator thought they had pinned it.
+            if args.mode == "download":
+                local = args.out / name / f"{name}.tar.gz"
+                if not local.is_file():
+                    errors.append(f"{name}: pinned but not installed at {local}")
+                elif hash_file(local) != sha:
+                    errors.append(f"{name}: {local} does not match its pin")
+                else:
+                    manifest[name] = {
+                        "kind": artifact.get("kind"),
+                        "path": str(local),
+                        "filename": local.name,
+                        "sha256": sha,
+                    }
+                    print(f"registered {name}: {sha} ({local})")
             continue
         if args.mode == "download":
             try:

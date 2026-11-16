@@ -1,0 +1,38 @@
+# xentry hardening for the per-domain QEMU profiles.
+#
+# Installed as /etc/apparmor.d/local/abstractions/libvirt-qemu and pulled in by
+# the distro abstraction's trailing
+#   include if exists <local/abstractions/libvirt-qemu>
+# so it applies to every libvirt-<uuid> profile without editing a distro file.
+#
+# This file only DENIES. The per-job overlay, seed ISO, serial log and the
+# backing image are granted per domain by virt-aa-helper from the domain XML;
+# nothing here may allow them. Deny rules win over allows, so these hold even
+# though the abstraction and the generated .files list are broader.
+
+  # App and broker state: a guest escape must not reach the evidence it is
+  # about to be judged by, the artifact mirror, or the app secret.
+  audit deny /etc/xentry/** mrwklx,
+  audit deny /run/xentry/** mrwklx,
+  audit deny /var/lib/xentry/index/** mrwklx,
+  audit deny /var/lib/xentry/evidence/** mrwklx,
+  audit deny /var/lib/xentry/artifacts/** mrwklx,
+  audit deny /var/lib/xentry/mirror/** mrwklx,
+
+  # Code: the app venv and the root broker.
+  audit deny /opt/xentry/** mrwklx,
+  audit deny /opt/xentry-broker/** mrwklx,
+
+  # Pinned base images are read through the overlay backing chain, so reads
+  # must stay allowed; writes to them never are. Locking must also stay
+  # allowed: QEMU takes an OFD lock on every image it opens, including the
+  # read-only bottom of the chain, and denying k makes it exit with
+  # "Failed to lock byte 100" before libvirt finishes connecting.
+  audit deny /var/lib/xentry/images/** wl,
+
+  # QEMU's filter-dump writes the proxy capture for a gitlab job. The path is
+  # handed to QEMU over the monitor after the domain starts, so virt-aa-helper
+  # never sees it in the domain XML and cannot add it to the generated profile.
+  # Without this rule the mknod is denied and target_probe fails with
+  # proxy_capture_failed.
+  /var/lib/xentry/jobs/[0-9a-f]*/capture/capture-[0-9a-f]*.pcap rwk,

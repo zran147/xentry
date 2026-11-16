@@ -269,3 +269,120 @@ def test_peer_uid_is_enforced(tmp_path: Path) -> None:
         assert exc.value.code == "broker_unavailable"
     finally:
         server.stop()
+
+
+def test_the_verb_tables_agree() -> None:
+    """Four tables have to know a verb before it can be called.
+
+    broker/registry.py keeping its own step allowlist is how every derived job
+    died with "unknown step id: setup-generic"; the verb tables are the same
+    shape of hazard one layer up.
+    """
+    from broker.main import HANDLERS, RUNTIME_VERBS, VERB_PARAMS
+
+    assert RUNTIME_VERBS <= set(VERB_PARAMS), set(RUNTIME_VERBS) - set(VERB_PARAMS)
+    assert RUNTIME_VERBS <= set(HANDLERS), set(RUNTIME_VERBS) - set(HANDLERS)
+    assert set(HANDLERS) == set(VERB_PARAMS), set(HANDLERS) ^ set(VERB_PARAMS)
+
+
+def test_the_runtime_answers_every_verb_it_is_routed(tmp_path: Path) -> None:
+    """A verb in RUNTIME_VERBS that runtime.handle() does not branch on falls
+    through to its final raise, which reads as an unknown verb rather than a
+    missing branch."""
+    import inspect
+
+    from broker import runtime as runtime_mod
+    from broker.main import RUNTIME_VERBS
+
+    source = inspect.getsource(runtime_mod.BrokerRuntime.handle)
+    for verb in sorted(RUNTIME_VERBS):
+        assert f'verb == "{verb}"' in source, f"runtime.handle has no branch for {verb}"
+
+
+def test_a_failed_network_create_leaves_no_service_running(tmp_path: Path) -> None:
+    """Three services start one after another, so a failure on the third used
+    to leave the first two bound to a gateway the same call then destroyed."""
+    from broker.runtime import BrokerRuntime
+
+    class Stub:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    runtime = BrokerRuntime(
+        data_dir=tmp_path, image_dir=tmp_path / "images", apply_nft=False,
+        virsh=_FakeVirsh(), manifest_path=None,
+    )
+    services = [Stub(), Stub(), Stub()]
+    runtime.mirrors["j1"] = services[0]  # type: ignore[assignment]
+    runtime.apt_proxies["j1"] = services[1]  # type: ignore[assignment]
+    runtime.registry_proxies["j1"] = services[2]  # type: ignore[assignment]
+    runtime._cleanup_network("xentry-j1")
+    assert [item.stopped for item in services] == [True, True, True]
+    assert not runtime.mirrors and not runtime.apt_proxies and not runtime.registry_proxies
+
+
+class _FakeVirsh:
+    def network_active(self, _name: str) -> bool:
+        return False
+
+    def network_exists(self, _name: str) -> bool:
+        return False
+
+
+# The broker keeps four tables that have to agree about one verb: VERB_PARAMS
+# says what the wire may carry, RUNTIME_VERBS says who handles it, the runtime
+# method declares what it takes, and BrokerRuntime.handle copies one into the
+# other by hand. Three of the four were updated for registry_cutoff; handle
+# dropped it, so the broker was always told "" and started no registry mirror
+# whatever its environment said. The job then failed at provision with a
+# message blaming the environment, which is where two cycles went.
+#
+# This is the same shape as the setup-generic/STEPS disagreement before it, so
+# it is worth a test that reads the code rather than a test per verb.
+RENAMED_VERBS = {"exec": "exec_step"}
+# One deliberate rename: the wire's `params` is the step's own parameter map,
+# and a method cannot call that `params` while also being handed the request's.
+RENAMED_PARAMS = {("exec", "params"): "inner_params"}
+
+
+def test_every_declared_param_reaches_the_runtime_method() -> None:
+    import inspect
+
+    from broker.main import RUNTIME_VERBS, VERB_PARAMS
+    from broker.runtime import BrokerRuntime
+
+    for verb in sorted(RUNTIME_VERBS):
+        method = getattr(BrokerRuntime, RENAMED_VERBS.get(verb, verb), None)
+        assert method is not None, f"{verb}: no runtime method of that name"
+        accepted = set(inspect.signature(method).parameters) - {"self"}
+        declared = {
+            RENAMED_PARAMS.get((verb, name), name)
+            for name in VERB_PARAMS.get(verb, frozenset())
+        }
+        unreachable = declared - accepted
+        assert not unreachable, (
+            f"{verb}: the wire accepts {sorted(unreachable)} but the runtime method "
+            "cannot take it, so it is silently discarded"
+        )
+
+
+def test_handle_passes_every_param_the_method_accepts() -> None:
+    """A parameter can also be lost between the two: handle calls each method
+    positionally, so a method may accept an argument handle never supplies."""
+    import inspect
+
+    from broker.main import RUNTIME_VERBS, VERB_PARAMS
+    from broker.runtime import BrokerRuntime
+
+    body = inspect.getsource(BrokerRuntime.handle)
+    for verb in sorted(RUNTIME_VERBS):
+        branch = body.split(f'verb == "{verb}"', 1)
+        if len(branch) < 2:
+            continue
+        # Up to the next branch, which is where this verb's call is made.
+        call = branch[1].split('if verb == "', 1)[0]
+        for name in sorted(VERB_PARAMS.get(verb, frozenset())):
+            assert name in call, f"{verb}: handle never reads {name}"

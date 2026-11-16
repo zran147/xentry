@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-TARGETS = frozenset({"php2shell", "gitlab", "dirtyfrag"})
+# "generic" is the derived target: one id for every CVE admitted from
+# extracted facts. The broker still owns its image and resources, and
+# broker/runtime.py must carry an entry for every id in here.
+TARGETS = frozenset({"php2shell", "gitlab", "dirtyfrag", "generic", "npm"})
 PROFILES = frozenset(
     {
         "isolated",
@@ -22,12 +25,26 @@ PROFILES = frozenset(
 IMAGES = {
     "ubuntu-24.04-target": "ubuntu-target-image",
     "ubuntu-24.04-dirtyfrag": "ubuntu-dirtyfrag-image",
+    "ubuntu-24.04-generic": "ubuntu-generic-image",
+    "ubuntu-20.04-generic": "ubuntu-focal-generic-image",
+    "debian-11-generic": "debian-11-generic-image",
+    "ubuntu-22.04-generic": "ubuntu-jammy-generic-image",
+    "ubuntu-18.04-generic": "ubuntu-bionic-generic-image",
     "ubuntu-24.04-attacker": "ubuntu-attacker-image",
 }
 ARTIFACTS = frozenset(
     {
         "ubuntu-target-image",
         "ubuntu-dirtyfrag-image",
+        "ubuntu-generic-image",
+        "ubuntu-focal-generic-image",
+        "debian-11-generic-image",
+        "ubuntu-jammy-generic-image",
+        "ubuntu-bionic-generic-image",
+        "ubuntu-jammy-base-image",
+        "ubuntu-bionic-base-image",
+        "ubuntu-focal-base-image",
+        "debian-11-base-image",
         "ubuntu-attacker-image",
         "php-8.4.26-src",
         "gitlab-19.2.5-deb",
@@ -40,6 +57,31 @@ ARTIFACTS = frozenset(
 )
 STEPS = frozenset(
     {
+        # Derived targets. Registered here as well as in targets/steps.yaml:
+        # resolve_step() is the broker's own allowlist, and a step the manifest
+        # describes but this set omits is refused as "unknown step id" at the
+        # first provisioning call - which is how every derived job died.
+        "setup-generic",
+        "setup-attacker",
+        "setup-docker",
+        "readiness-generic",
+        # The local privesc path. One run step per shape, because the relay
+        # that carries the proof out has to be handed to the exploit the way
+        # that exploit accepts it, and the app never supplies a command.
+        "readiness-local",
+        "null-local",
+        "run-poc-local-stdin",
+        "run-poc-local-argv",
+        "run-poc-local-patch",
+        "run-poc-local-pty",
+        "run-poc-local-setuid",
+        "run-poc-local-stage",
+        "reboot-generic",
+        "setup-npm",
+        "readiness-npm",
+        "build-poc-generic",
+        "run-poc-generic",
+        "null-generic",
         "setup-php",
         "setup-gitlab",
         "setup-dirtyfrag",

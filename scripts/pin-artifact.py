@@ -25,7 +25,14 @@ def main() -> int:
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--commit", default="")
     parser.add_argument("--source", required=True, help="vendor URL or build-script provenance")
-    parser.add_argument("--accept", action="store_true", help="confirm the operator reviewed the source")
+    parser.add_argument(
+        "--accept", action="store_true", help="confirm the operator reviewed the source"
+    )
+    parser.add_argument(
+        "--kind",
+        default="",
+        help="create the entry with this kind (image, package, poc) if it does not exist",
+    )
     parser.add_argument("--catalog", type=Path, default=CATALOG)
     args = parser.parse_args()
 
@@ -41,17 +48,35 @@ def main() -> int:
     data = load_catalog(args.catalog)
     artifacts = data.setdefault("artifacts", {})
     if args.artifact not in artifacts:
-        print(f"unknown artifact: {args.artifact}", file=sys.stderr)
-        return 2
+        # Creating an entry needs --kind, because kind has no safe default and
+        # a typo in --artifact would otherwise add a second entry rather than
+        # correct the first. The alternative - adding an unresolved entry by
+        # hand first - leaves the catalog failing Gate G until it is pinned.
+        if not args.kind:
+            print(
+                f"unknown artifact: {args.artifact}; pass --kind to create it",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.url:
+            print("a new artifact needs --url", file=sys.stderr)
+            return 2
+        artifacts[args.artifact] = {"kind": args.kind, "url": args.url}
+        print(f"creating {args.artifact} ({args.kind})")
 
     artifact = artifacts[args.artifact]
     url = args.url or artifact.get("url", "")
     if url.startswith("build://"):
-        print("build artifact: hash must come from the build script; source recorded", file=sys.stderr)
+        print(
+            "build artifact: hash must come from the build script; source recorded", file=sys.stderr
+        )
     elif url:
         actual, size = fetch_and_hash(url, timeout=600.0)
         if actual != sha:
-            print(f"hash mismatch: expected {sha}, downloaded {actual} ({size} bytes)", file=sys.stderr)
+            print(
+                f"hash mismatch: expected {sha}, downloaded {actual} ({size} bytes)",
+                file=sys.stderr,
+            )
             return 1
         print(f"verified {url}: {actual} ({size} bytes)")
     else:

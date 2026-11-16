@@ -2,36 +2,74 @@
 {% block content %}
 <section class="panel">
   <h1>Submit a CVE and PoC</h1>
-  <p class="muted">The V1 target set is fixed: PHP2Shell, GitLab, and Dirty Frag. The PoC must match the pinned target.</p>
+
+  <ol class="stepper">
+    <li id="stage-check" data-n="1">Check links</li>
+    <li id="stage-start" data-n="2">Start job</li>
+  </ol>
+
   <form id="submit-form" autocomplete="off">
     <label for="cve-url">CVE link</label>
     <input id="cve-url" name="cve_url" type="url" required placeholder="https://...">
     <label for="poc-url">PoC link</label>
     <input id="poc-url" name="poc_url" type="url" required placeholder="https://github.com/...">
     <div class="actions">
-      <button id="check-button" type="button">Check links</button>
-      <button id="submit-button" type="submit" disabled>Start job</button>
-      <button id="preflight-button" type="button" class="secondary">Preflight</button>
+      <button id="check-button" type="button"><span class="spinner" hidden></span>Check links</button>
+      <button id="submit-button" type="submit" disabled><span class="spinner" hidden></span>Start job</button>
+      <button id="preflight-button" type="button" class="secondary"><span class="spinner" hidden></span>Preflight</button>
     </div>
   </form>
+
+  <div id="submit-progress" class="progress-region" hidden>
+    <div class="progress" role="progressbar" aria-label="Submission progress"></div>
+    <p class="progress-label">
+      <span class="what"></span>
+      <span class="elapsed"></span>
+      <span id="check-expiry" class="muted"></span>
+    </p>
+  </div>
+
   <pre id="plan" class="plan" hidden></pre>
-  <p id="message" class="message" role="status"></p>
+  <section id="approval" class="panel" hidden>
+    <h2>Approve a download <span class="pill" data-status="pending">last resort</span></h2>
+    <p class="muted">
+      Every provisioning channel above was tried and none of them carries this
+      software. A file can be approved instead: it is fetched here, on the host,
+      and its digest is recorded with this check - so what the job installs is
+      these bytes, not whatever that URL serves later. Only this job can use it.
+    </p>
+    <p class="muted">
+      A tarball, a zip or a .deb. An installer that has to be <em>run</em> is
+      refused: that is arbitrary code, which no provisioning step here executes.
+    </p>
+    <label for="approval-url">File URLs, one per line</label>
+    <textarea id="approval-url" name="approval_url" rows="4"
+              placeholder="https://example.com/thing.deb"></textarea>
+    <div class="actions">
+      <button id="approval-button" type="button">
+        <span class="spinner" hidden></span>Fetch and show me the digest
+      </button>
+    </div>
+    <pre id="approval-detail" class="plan" hidden></pre>
+  </section>
+
+  <p id="message" class="message" role="status" aria-live="polite"></p>
 </section>
 
 <section class="panel">
   <h2>Jobs</h2>
   {% if jobs %}
   <table>
-    <thead><tr><th>ID</th><th>Target</th><th>State</th><th>Verdict</th><th>Authority</th><th>Created</th></tr></thead>
+    <thead><tr><th>ID</th><th>CVE</th><th>State</th><th>Verdict</th><th>Authority</th><th>Created</th></tr></thead>
     <tbody>
       {% for job in jobs %}
       <tr>
-        <td><a href="/jobs/{{ job.id }}">{{ job.id[:12] }}</a></td>
-        <td>{{ job.target_id }}</td>
-        <td>{{ job.state }}</td>
-        <td>{{ job.verdict or "not_run" }}</td>
+        <td><a class="mono" href="/jobs/{{ job.id }}">{{ job.id[:12] }}</a></td>
+        <td class="mono">{{ job.cve_id or job.target_id }}</td>
+        <td><span class="pill" data-status="{{ job.state }}">{{ job.state }}</span></td>
+        <td><span class="pill" data-status="{{ job.verdict or 'not_run' }}">{{ job.verdict or "not_run" }}</span></td>
         <td>{{ job.authority or "pending" }}</td>
-        <td>{{ job.created_at }}</td>
+        <td class="mono ts" data-ts="{{ job.created_at or '' }}">{{ job.created_at }}</td>
       </tr>
       {% endfor %}
     </tbody>

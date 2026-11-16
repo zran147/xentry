@@ -70,6 +70,8 @@ The contracts' 23-step table is the single list. Applicability:
 * Local only: `host_evidence`.
 * Dirty Frag only: `reboot_dirtyfrag` and a post-boot `readiness-dirtyfrag` + `uname -r` row after `restore_or_reboot`.
 * All targets: fetch, extract, plan, create_network, create_target, provision, readiness, freeze, place_nonce, null_actor, probe_null, place_fresh_nonce, real_actor, target_probe, destroy_target, destroy_network, validate, project.
+* Rebuilt environment only: `select_target` in place of fetch/extract/plan, and nothing from freeze onward.
+* Optional, any target that installs packages at provisioning time: the `apt-pin` step (`targets/common/apt-pin.sh`, root, params `apt_proxy_url` and `suite`). It points apt at the job's pinned snapshot mirror, which `create_network` reports as `apt_proxy_url` with its serial as `apt_snapshot`. Reachable during provisioning only.
 
 Probe dispatch:
 
@@ -392,12 +394,13 @@ The step list is remote-target and local-target aware. `step_id` is the broker r
 | 1 | fetch | n/a | cve_url, poc_url | app | 120 s | transient | artifacts + hashes | none | `source_unavailable` |
 | 2 | extract | n/a | excerpts | app | 120 s | none | Facts + citations | none | `evidence_insufficient` |
 | 3 | plan | n/a | Facts, target_id | app | 60 s | none | plan + check_id | none | `unsupported_target` |
-| 4 | create_network | n/a | network profile | broker | 120 s | once | network id | destroy network | `network_create_failed` |
+| 4 | create_network | n/a | network profile | broker | 120 s | once | network id, mirror_url, apt_proxy_url, apt_snapshot | destroy network | `network_create_failed` |
 | 5 | create_target | n/a | target, image | broker | 300 s | once | vm id/ip | destroy vm | `target_create_failed` |
 | 6 | provision | setup-* | mirror_url | root | 1800 s | none | setup log | destroy vm | `provision_failed` |
 | 7 | readiness | readiness-* | expected_version | xentry-guest | 300 s | once | version output | destroy vm | `target_unhealthy` |
 | 8 | create_attacker | n/a | attacker profile, image | broker | 300 s | once | vm id/ip | destroy vm | `attacker_create_failed` |
-| 9 | build_poc | build-poc-* | poc artifact | xentry-guest | 600 s | none | build log/hash | destroy attacker | `poc_build_failed` |
+| 9 | stage_poc (derived only) | n/a | poc repository | app + broker | 120 s | none | archive bytes + digest, job-scoped | destroy attacker | `unsupported_poc` |
+| 9 (10 if derived) | build_poc | build-poc-* | poc artifact | xentry-guest | 600 s | none | build log/hash | destroy attacker | `poc_build_failed` |
 | 10 | freeze | n/a | vm id | broker | 120 s | once | snapshot ref | destroy vm | `snapshot_failed` |
 | 11 | place_nonce | n/a | nonce id/path/owner/mode | broker | 60 s | none | nonce hash | destroy vm | `nonce_place_failed` |
 | 12 | null_actor | null-* | nonce path | xentry-guest | 300 s | none | null transcript | destroy VMs | `null_actor_observed_nonce` |
@@ -478,7 +481,8 @@ Each script is checked in, hash-pinned, and run once as root. `mirror_url` is a 
 | --- | --- | --- | --- |
 | `source_unavailable` | Fetch failed | transient once | check links |
 | `evidence_insufficient` | Facts cannot be cited | none | supply a better link |
-| `unsupported_target` | CVE not in the three targets | none | choose a supported CVE |
+| `unsupported_target` | CVE not in the three targets and no target could be derived from it | none | choose a supported CVE |
+| `no_observable` | A target could not be derived because no evidence design fits the facts: a local PoC, no port, a protocol the harness does not open, no entrypoint named in the PoC text, or a package/unit token outside the allowed vocabulary | none | the message says which; a CVE of this shape needs a checked-in target |
 | `unsupported_poc` | PoC does not match the pin | none | use the pinned PoC |
 | `version_unidentified` | Advisory range or version missing | none | supply version evidence |
 | `preflight_refused` | Host memory/disk/broker/image gate failed | none | free resources or fix the host |
@@ -497,6 +501,7 @@ Each script is checked in, hash-pinned, and run once as root. `mirror_url` is a 
 | `probe_failed` | Probe could not run | once | inspect probe evidence |
 | `nonce_not_observed` | Real run/probe did not observe the nonce | none | inspect runner facts |
 | `exploit_failed` | PoC ran without the nonce | none | do not auto-retry |
+| `target_panicked` | The guest's kernel died while the PoC ran, read from the host serial log | none | the exploit crashed it; read the panic |
 | `poc_build_failed` | Attacker/target build failed | none | inspect build log |
 | `host_evidence_missing` | Dirty Frag host channel empty | once | inspect host evidence |
 | `validator_error` | Provider/JSON/schema failure | once | park or `inconclusive` |

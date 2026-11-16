@@ -24,11 +24,5 @@ def redact(text: str, values: list[str]) -> str:
     return text
 
 
-def redact_hex(text: str, values: list[str]) -> str:
-    redacted = redact(text, values)
-    # Keep hashes and IDs; only redact when an explicit value was supplied.
-    return redacted
-
-
 def constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))

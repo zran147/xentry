@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +33,16 @@ def _artifact_sha(artifact_id: str) -> str:
     if not isinstance(artifact, dict) or not artifact.get("sha256"):
         raise RuntimeError(f"artifact is not pinned: {artifact_id}")
     return str(artifact["sha256"])
+
+
+def resolved_artifacts() -> set[str]:
+    """Artifact ids the catalog pins with a real digest."""
+    artifacts = _load_yaml(CATALOG).get("artifacts") or {}
+    return {
+        name
+        for name, entry in artifacts.items()
+        if isinstance(entry, dict) and entry.get("status") == "resolved"
+    }
 
 
 def _step_sha(step_id: str) -> str:
@@ -74,6 +83,17 @@ class TargetInstance:
     poc_dir: str
     what_proves: tuple[str, ...]
     what_does_not_prove: tuple[str, ...]
+    # Set only by an ecosystem target: the one package whose version the
+    # fixed-version control run moves. Empty when the advisory's product is not
+    # a dependency this lab declares, and the job then claims less.
+    subject_package: str = ""
+    # Set with subject_package: the version the advisory says fixes the flaw. A
+    # second build of the same app, with that one dependency overridden, is
+    # installed beside the first and served on control_port. The control run
+    # points the same PoC at that port and requires it to fail, which is what
+    # separates "the exploit works here" from "the vulnerability is why".
+    fixed_version: str = ""
+    control_port: int = 0
     zif_offset: str = "0x466220"
     dtor_offset: str = "0x645870"
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
@@ -252,10 +272,41 @@ def _build_targets() -> dict[str, TargetInstance]:
 
 
 TARGETS = _build_targets()
+# The mtimes TARGETS was built from. It carries the step hashes and artifact
+# digests of the three checked-in targets, read once at import - so re-pinning
+# one of them, or editing its script, left a running app serving the old digest
+# and a job failing with "artifact hash mismatch" until someone restarted it.
+# The broker had the same shape and the same symptom (entry 49b).
+_STAMPS: dict[str, int] = {}
+
+
+def _fresh() -> dict[str, TargetInstance]:
+    """TARGETS, rebuilt if either file it is derived from has changed.
+
+    The dict object is mutated rather than replaced, because callers do
+    `from xentry.targets import TARGETS` and would otherwise keep the old one.
+    """
+    changed = False
+    for path in (STEPS, CATALOG):
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if _STAMPS.get(str(path)) != stamp:
+            _STAMPS[str(path)] = stamp
+            changed = True
+    if changed and _STAMPS:
+        TARGETS.clear()
+        TARGETS.update(_build_targets())
+    return TARGETS
+
+
+def by_id(target_id: str) -> TargetInstance | None:
+    return _fresh().get(target_id)
 
 
 def by_cve(cve_id: str) -> TargetInstance | None:
-    for target in TARGETS.values():
+    for target in _fresh().values():
         if cve_id in target.cve_ids:
             return target
     return None
@@ -263,26 +314,14 @@ def by_cve(cve_id: str) -> TargetInstance | None:
 
 def by_poc_url(url: str) -> TargetInstance | None:
     cleaned = url.rstrip("/").removesuffix(".git")
-    for target in TARGETS.values():
+    for target in _fresh().values():
         if cleaned == target.poc.repository.rstrip("/").removesuffix(".git"):
             return target
     return None
 
 
-def step_script_hash(step_id: str) -> str:
-    return _step_sha(step_id)
-
-
 def artifact_hash(artifact_id: str) -> str:
     return _artifact_sha(artifact_id)
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def setup_script_path(target: TargetInstance) -> Path:

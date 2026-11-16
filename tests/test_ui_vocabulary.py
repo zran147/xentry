@@ -74,3 +74,55 @@ def test_rendered_ui_separates_state_verdict_and_authority(tmp_path: Path) -> No
         assert bundle.status_code == 200
         _assert_unbanned(bundle.text, "bundle json")
         assert bundle.json()["job"]["id"] == job_id
+
+
+def test_a_derived_job_states_its_caveats_without_banned_words(tmp_path: Path) -> None:
+    """The caveats are the text most likely to reach for a banned word.
+
+    They are also the only claim text that is not checked in per target: a
+    derived target's proves/does-not-prove come from xentry.generic, and the
+    php2shell job above would never render them.
+    """
+    from xentry import generic
+
+    db_path = tmp_path / "data" / "xentry.db"
+    conn = init_db(db_path)
+    job_id, _attempt_id, _ = create_job(
+        conn,
+        data_dir=tmp_path / "data",
+        poc_url=POC_URL,
+        cve_url="https://example.com/cve",
+    )
+    set_plan(
+        conn,
+        job_id,
+        cve_id="CVE-2026-55555",
+        target_id=generic.GENERIC_ID,
+        bundle_sha256="d" * 64,
+    )
+    conn.execute(
+        "UPDATE jobs SET outcome='completed', verdict='reproduced', "
+        "authority='guest_attested+llm_assessed', reason_code='nonce_observed', "
+        "cleanup_state='done' WHERE id=?",
+        (job_id,),
+    )
+    conn.commit()
+    conn.close()
+    for claim in (*generic.PROVES, *generic.DOES_NOT_PROVE):
+        _assert_unbanned(claim, "derived claim")
+    app = build_app(
+        data_dir=tmp_path / "data",
+        db_path=db_path,
+        broker_socket=tmp_path / "broker.sock",
+    )
+    with TestClient(app) as client:
+        page = client.get(f"/jobs/{job_id}")
+        assert page.status_code == 200
+        _assert_unbanned(page.text, "derived job page")
+        audit = client.get(f"/jobs/{job_id}/audit")
+        assert audit.status_code == 200
+        _assert_unbanned(audit.text, "derived audit page")
+        # The caveats have to actually be on the page, or this proves nothing.
+        assert "attested by the attacker" in audit.text
+        assert "no human reviewed" in audit.text
+        assert "guest_attested+llm_assessed" in page.text

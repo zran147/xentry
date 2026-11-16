@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% set job = bundle.job %}
+{% block content %}
+<section class="panel">
+  <div class="row">
+    <h1>Audit <span class="mono">{{ job.id[:12] }}</span></h1>
+    <span>
+      <a class="secondary button" href="/jobs/{{ job.id }}">Job</a>
+      <a class="secondary button" href="/api/jobs/{{ job.id }}/bundle">Download JSON</a>
+    </span>
+  </div>
+  <dl class="facts">
+    <dt>Target</dt><dd>{{ job.target_id }}</dd>
+    <dt>CVE</dt><dd>{{ job.cve_id or "-" }}</dd>
+    <dt>Verdict</dt><dd><span class="pill" data-status="{{ job.verdict or 'not_run' }}">{{ job.verdict or "not_run" }}</span></dd>
+    <dt>Authority</dt><dd>{{ job.authority or "-" }}</dd>
+    <dt>Reason</dt><dd>{{ job.reason_code or "-" }}</dd>
+    <dt>Bundle format</dt><dd>{{ bundle.format }}</dd>
+    <dt>Manifest sha256</dt><dd class="mono">{{ bundle.manifest_sha256 }}</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Success criteria</h2>
+  <p class="muted">From the pinned target definition, not from the model.</p>
+  {% if proves %}
+  <p><strong>A pass proves</strong></p>
+  <ul>{% for item in proves %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if not_proves %}
+  <p><strong>It does not prove</strong></p>
+  <ul class="muted">{% for item in not_proves %}<li>{{ item }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if not proves and not not_proves %}
+  <p class="muted">No criteria recorded for this target.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Model calls</h2>
+  <p class="muted">
+    Each stage is a single request and a single reply; the agent is configured with no
+    tools, so there are no tool calls to show. Text is rendered only when it still
+    matches the sha256 recorded at capture time.
+  </p>
+  {% if llm %}
+    {% for call in llm %}
+    <h3 class="mono">{{ call.stage }}</h3>
+    <dl class="facts">
+      <dt>Prompt</dt><dd><span class="mono">{{ call.prompt_sha256[:16] or "-" }}</span> · {{ call.prompt_bytes or 0 }} bytes</dd>
+      <dt>Response</dt><dd><span class="mono">{{ call.response_sha256[:16] or "-" }}</span> · {{ call.response_bytes or 0 }} bytes</dd>
+    </dl>
+    <details>
+      <summary>Question</summary>
+      <pre class="plan">{{ call.prompt or "[not captured]" }}</pre>
+    </details>
+    <details>
+      <summary>Response</summary>
+      <pre class="plan">{{ call.response or "[not captured]" }}</pre>
+    </details>
+    {% endfor %}
+  {% else %}
+  <p class="muted">No transcript recorded. Jobs run before transcript capture was added store only the validator prompt hash, shown under Validation below.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Validation</h2>
+  {% if bundle.validations %}
+    {% for v in bundle.validations %}
+    <dl class="facts">
+      <dt>Model</dt><dd class="mono">{{ v.validator_model }}</dd>
+      <dt>Prompt sha256</dt><dd class="mono">{{ v.validator_prompt_hash }}</dd>
+      <dt>Verdict</dt><dd><span class="pill" data-status="{{ v.verdict }}">{{ v.verdict }}</span></dd>
+      <dt>Authority</dt><dd>{{ v.authority }}</dd>
+      <dt>Reason</dt><dd>{{ v.reason_code or "-" }}</dd>
+      <dt>Runner observed nonce</dt><dd>{{ v.runner_nonce_observed }}</dd>
+      <dt>Null actor observed nonce</dt><dd>{{ v.null_actor_observed_nonce }}</dd>
+    </dl>
+    {% endfor %}
+  {% else %}
+  <p class="muted">No validation row.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Steps <span class="muted">({{ bundle.steps | length }})</span></h2>
+  <table>
+    <thead><tr><th>#</th><th>Name</th><th>Step</th><th>State</th><th>Reason</th><th>Started</th><th>Finished</th></tr></thead>
+    <tbody>
+      {% for s in bundle.steps %}
+      <tr>
+        <td>{{ s.seq }}</td>
+        <td>{{ s.name }}</td>
+        <td class="mono">{{ s.step_id or "-" }}</td>
+        <td><span class="pill" data-status="{{ s.state }}">{{ s.state }}</span></td>
+        <td>{{ s.reason_code or "-" }}</td>
+        <td class="mono ts" data-fmt="time" data-ts="{{ s.started_at or '' }}">{{ (s.started_at or "-")[11:19] }}</td>
+        <td class="mono ts" data-fmt="time" data-ts="{{ s.finished_at or '' }}">{{ (s.finished_at or "-")[11:19] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Privileged actions <span class="muted">({{ bundle.broker_calls | length }} broker calls)</span></h2>
+  <p class="muted">Every privileged operation the runner asked the root broker to perform. Parameters are recorded as a sha256, not in full.</p>
+  <table>
+    <thead><tr><th>#</th><th>Verb</th><th>Params sha256</th><th>Status</th><th>Started</th><th>Finished</th></tr></thead>
+    <tbody>
+      {% for c in bundle.broker_calls %}
+      <tr>
+        <td>{{ c.seq }}</td>
+        <td class="mono">{{ c.verb }}</td>
+        <td class="mono">{{ (c.params_sha256 or "-")[:16] }}</td>
+        <td><span class="pill" data-status="{{ c.status }}">{{ c.status }}</span></td>
+        <td class="mono ts" data-fmt="time" data-ts="{{ c.started_at or '' }}">{{ (c.started_at or "-")[11:19] }}</td>
+        <td class="mono ts" data-fmt="time" data-ts="{{ c.finished_at or '' }}">{{ (c.finished_at or "-")[11:19] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Nonces <span class="muted">({{ bundle.nonces | length }})</span></h2>
+  <p class="muted">Only the hash is stored; the value never reaches the database, the model, or this page.</p>
+  <table>
+    <thead><tr><th>Phase</th><th>Nonce id</th><th>sha256</th><th>Path</th><th>Owner</th><th>Mode</th></tr></thead>
+    <tbody>
+      {% for n in bundle.nonces %}
+      <tr>
+        <td>{{ n.phase }}</td>
+        <td class="mono">{{ n.nonce_id }}</td>
+        <td class="mono">{{ (n.sha256 or "-")[:16] }}</td>
+        <td class="mono">{{ n.path }}</td>
+        <td>{{ n.owner }}</td>
+        <td class="mono">{{ n.mode }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Artifacts <span class="muted">({{ bundle.artifacts | length }})</span></h2>
+  <table>
+    <thead><tr><th>Kind</th><th>sha256</th><th>Bytes</th><th></th></tr></thead>
+    <tbody>
+      {% for a in bundle.artifacts %}
+      <tr>
+        <td class="mono">{{ a.kind }}</td>
+        <td class="mono">{{ (a.sha256 or "-")[:16] }}</td>
+        <td>{{ a.bytes }}</td>
+        <td><a href="/api/jobs/{{ job.id }}/evidence/{{ a.id }}">download</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Event journal <span class="muted">({{ bundle.events | length }})</span></h2>
+  <p class="muted">Hash-chained; each record carries the hash of the one before it.</p>
+  <details>
+    <summary>Show journal</summary>
+    <table>
+      <thead><tr><th>Type</th><th>Time</th><th>Hash</th><th>Payload</th></tr></thead>
+      <tbody>
+        {% for e in bundle.events %}
+        <tr>
+          <td class="mono">{{ e.type }}</td>
+          <td class="mono">{{ (e.ts or "-")[11:19] }}</td>
+          <td class="mono">{{ (e.hash or "-")[:12] }}</td>
+          <td class="mono">{{ e.payload }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+</section>
+{% endblock %}

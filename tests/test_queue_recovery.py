@@ -36,6 +36,8 @@ class RecoveryBroker:
             }
         if verb in {"destroy_vm", "destroy_network"}:
             return {"destroyed": True}
+        if verb == "lock_network":
+            return {"locked": True, "target_ports": params.get("target_ports", [])}
         raise AssertionError(f"unexpected verb: {verb}")
 
 

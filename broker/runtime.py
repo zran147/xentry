@@ -18,6 +18,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -28,11 +29,19 @@ from typing import Any
 import asyncssh
 import yaml
 
+from broker.aptproxy import AptProxyError, AptSnapshotProxy
 from broker.errors import BrokerError
 from broker.exec_ops import SSHError, SSHTransport
 from broker.libvirt_ops import LibvirtError, Virsh, domain_xml, network_xml
 from broker.mirror import ArtifactMirror, MirrorError
-from broker.network_ops import Nftables, NftablesError, provisioning_rules
+from broker.network_ops import (
+    TABLE,
+    Nftables,
+    NftablesError,
+    locked_rules,
+    provisioning_rules,
+)
+from broker.ociproxy import OciMirror, OciProxyError
 from broker.proxy import CaptureError, ProxyCapture, SerialCapture, parse_capture
 from broker.registry import (
     RegistryError,
@@ -41,6 +50,7 @@ from broker.registry import (
     resolve_step,
     resolve_target,
 )
+from broker.registryproxy import RegistryProxy, RegistryProxyError
 from broker.steps import StepRegistry
 
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -49,10 +59,54 @@ NONCE_RE = re.compile(r"^[0-9a-f]{32,128}$")
 OWNER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 TARGET_MAC = "52:54:00:00:00:10"
 ATTACKER_MAC = "52:54:00:00:00:20"
+JOB_SUBNET_PREFIX = "10.42"
+
+
+@dataclass(frozen=True)
+class JobNet:
+    """One job's own /24, bridge and nftables table.
+
+    A job used to share a single bridge, subnet and table with every other, so
+    only one could run at a time. Everything here is derived from one octet, so
+    two jobs are on separate L2 segments: a mistake in the phase rules cannot
+    let one job's attacker reach another job's target.
+    """
+
+    octet: int
+    bridge: str
+    gateway: str
+    target_ip: str
+    attacker_ip: str
+    table: str
+    mirror_url: str
+
+    @classmethod
+    def for_octet(cls, octet: int, mirror_port: int) -> JobNet:
+        prefix = f"{JOB_SUBNET_PREFIX}.{octet}"
+        return cls(
+            octet=octet,
+            # Bridge names are capped at 15 characters by the kernel.
+            bridge=f"xentry-{octet}",
+            gateway=f"{prefix}.1",
+            target_ip=f"{prefix}.10",
+            attacker_ip=f"{prefix}.20",
+            table=f"{TABLE}_{octet}",
+            mirror_url=f"http://{prefix}.1:{mirror_port}",
+        )
+
+    @property
+    def subnet(self) -> str:
+        return f"{JOB_SUBNET_PREFIX}.{self.octet}.0/24"
+
+
 TARGET_IP = "10.42.0.10"
 ATTACKER_IP = "10.42.0.20"
 BRIDGE = "xentry0"
 MIRROR_URL = "http://10.42.0.1:8081"
+# A staged id is job-scoped and becomes a filename, so it is narrower
+# than a catalog id: no dots, no slashes, no leading dash.
+STAGED_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ATTACKER_PROFILE_ID = "attacker-remote"
 ATTACKER_IMAGE_ID = "ubuntu-24.04-attacker"
 
@@ -69,11 +123,32 @@ TARGET_PROFILES = {
     "php2shell": Resources(vcpu=2, memory_mb=4096, disk_gb=25, target_ports=(8088,)),
     "gitlab": Resources(vcpu=4, memory_mb=8192, disk_gb=50, target_ports=(80, 443)),
     "dirtyfrag": Resources(vcpu=2, memory_mb=2048, disk_gb=25),
+    # A derived target's ports are per-CVE, so none are declared here; the
+    # broker decides its size, as it does for every other target.
+    "generic": Resources(vcpu=2, memory_mb=4096, disk_gb=25),
+    # An npm closure unpacks to roughly 3.5x its pinned size and a framework
+    # build is the memory-hungry part, so this one is not the generic shape.
+    "npm": Resources(vcpu=4, memory_mb=8192, disk_gb=40),
 }
+# Tuples: a derived target picks its release per CVE, so one target id has
+# several admissible images. The app still names exactly one per job, and it
+# must be one of these.
 TARGET_IMAGES = {
-    "php2shell": "ubuntu-24.04-target",
-    "gitlab": "ubuntu-24.04-target",
-    "dirtyfrag": "ubuntu-24.04-dirtyfrag",
+    "php2shell": ("ubuntu-24.04-target",),
+    "gitlab": ("ubuntu-24.04-target",),
+    "dirtyfrag": ("ubuntu-24.04-dirtyfrag",),
+    "generic": (
+        "ubuntu-24.04-generic",
+        "ubuntu-22.04-generic",
+        "ubuntu-20.04-generic",
+        "debian-11-generic",
+        "ubuntu-18.04-generic",
+    ),
+    # The generic image, not one of its own. node comes from the job's
+    # registry mirror like any other dependency, so an ecosystem target needs
+    # nothing baked in - which is what stops this table growing a 2.3 GB image
+    # per ecosystem.
+    "npm": ("ubuntu-24.04-generic",),
 }
 ATTACKER_RESOURCES = Resources(vcpu=2, memory_mb=2048, disk_gb=10)
 
@@ -113,6 +188,40 @@ def _guest_path(params: dict[str, Any], key: str = "guest_path") -> str:
     return value
 
 
+# Step command traces are written here in the guest. copy_out resolves a
+# relative guest path against /home/xentry-guest, so the trace has to live
+# under that directory to be readable back out.
+GUEST_TRACE_DIR = "/home/xentry-guest/.xentry-trace"
+GUEST_TRACE_REL = ".xentry-trace"
+
+
+def step_command(remote_script: str, values: list[str], step_id: str, trace: bool = False) -> str:
+    """Build the guest shell command for a step.
+
+    With `trace`, each command the step runs is recorded. `bash -x` alone
+    writes that to stderr, which would mix it into the step's real stderr and
+    into the failure message the app reports, so BASH_XTRACEFD moves it to fd 9
+    and fd 9 is redirected to a file in the guest. stdout, stderr and the exit
+    code are untouched. The file lives under the actor's home because copy_out
+    resolves relative guest paths against it, and the guest is destroyed at
+    teardown.
+
+    Without `trace` the command is exactly what it was before tracing existed.
+    The directory is created by the caller's root session, owned by the user
+    the step runs as: created here instead, a root step would leave a directory
+    no later unprivileged step could write its trace into, and the redirect
+    would fail before the script ran.
+    """
+    command = f"bash {shlex.quote(remote_script)}"
+    if trace:
+        command = f"BASH_XTRACEFD=9 bash -x {shlex.quote(remote_script)}"
+    if values:
+        command += " " + " ".join(shlex.quote(value) for value in values)
+    if trace:
+        command += f" 9>{shlex.quote(f'{GUEST_TRACE_DIR}/{step_id}.trace')}"
+    return command
+
+
 class BrokerRuntime:
     def __init__(
         self,
@@ -126,8 +235,31 @@ class BrokerRuntime:
         nft: Nftables | None = None,
         manifest_path: Path | None = None,
         start_mirror: bool = False,
-        mirror_bind: str = "10.42.0.1",
+        # Empty means "this job's gateway"; an explicit value overrides it,
+        # which is how a dev host binds the mirror somewhere reachable.
+        mirror_bind: str = "",
         mirror_port: int = 8081,
+        # The pinned apt mirror. Off unless asked for: the three checked-in
+        # targets install from baked images and need no package archive.
+        start_apt_proxy: bool = False,
+        apt_port: int = 8082,
+        # The date-pinned registry mirror, for an ecosystem target. Off unless
+        # asked for, like the apt one, and for the same reason.
+        start_registry_proxy: bool = False,
+        registry_port: int = 8083,
+        # The attacker's own apt archive. A separate proxy, not a second
+        # archive on the target's: the attacker image is Ubuntu noble and the
+        # target's proxy serves one archive at one serial, which for a 2021
+        # advisory is Debian sid at 20211004. Pointing noble at that would ask
+        # apt to install Debian packages onto Ubuntu. The attacker's tooling is
+        # not the subject of the experiment, so it takes the current serial -
+        # and keeping it a separate proxy keeps each one's contract intact.
+        attacker_apt_port: int = 8084,
+        # Docker Hub for Debian and Ubuntu base images, when a PoC's own
+        # Dockerfile is the only description of the vulnerable environment its
+        # author wrote. Off unless asked for, like the others.
+        start_oci_mirror: bool = False,
+        oci_port: int = 8086,
         steps_manifest: Path | None = None,
         targets_dir: Path | None = None,
     ) -> None:
@@ -146,13 +278,43 @@ class BrokerRuntime:
         self.start_mirror = start_mirror
         self.mirror_bind = mirror_bind
         self.mirror_port = mirror_port
-        self.mirror: ArtifactMirror | None = None
+        # One mirror per job, bound to that job's gateway: with forward=none a
+        # guest on 10.42.7.0/24 cannot reach a mirror on 10.42.0.1.
+        self.mirrors: dict[str, ArtifactMirror] = {}
+        self.start_apt_proxy = start_apt_proxy
+        self.apt_port = apt_port
+        # Keyed by job like every other per-job proxy, so cleanup finds it.
+        self.container_proxies: dict[str, AptSnapshotProxy] = {}
+        # Shared across jobs on purpose: one snapshot, so a package fetched for
+        # an earlier job is the same bytes for a later one.
+        self.apt_cache = self.data_dir / "apt-cache"
+        self.apt_proxies: dict[str, AptSnapshotProxy] = {}
+        self.start_registry_proxy = start_registry_proxy
+        self.registry_port = registry_port
+        # Shared across jobs and across CVEs: the cache holds the unfiltered
+        # upstream index, so a second job filters the same bytes at its own
+        # cutoff and asks upstream for nothing. This is the whole reason a
+        # proxy beats a per-lab closure on cost as well as on correctness.
+        self.registry_cache = self.data_dir / "registry-cache"
+        self.attacker_apt_port = attacker_apt_port
+        self.attacker_proxies: dict[str, AptSnapshotProxy] = {}
+        self.start_oci_mirror = start_oci_mirror
+        self.oci_port = oci_port
+        # Shared across jobs: a layer is addressed by its own digest, so the
+        # same bytes are the same bytes for every job that asks.
+        self.oci_cache = self.data_dir / "oci-cache"
+        self.oci_mirrors: dict[str, OciMirror] = {}
+        self.registry_proxies: dict[str, RegistryProxy] = {}
+        self._alloc_lock = threading.Lock()
         self.steps_manifest = Path(
             steps_manifest or os.environ.get("XENTRY_STEPS_MANIFEST", "targets/steps.yaml")
         )
         self.targets_dir = Path(targets_dir or os.environ.get("XENTRY_TARGETS_DIR", "targets"))
         self._step_registry: StepRegistry | None = None
         self._catalog: dict[str, dict[str, Any]] | None = None
+        # mtime of each cached file, so a pin or a build taking effect does not
+        # need a broker restart nobody knew to do.
+        self._stamps: dict[str, int] = {}
         self._build_results: dict[str, Any] | None = None
         self._image_cache: dict[str, str] = {}
         self._serial_captures: dict[str, SerialCapture] = {}
@@ -175,10 +337,55 @@ class BrokerRuntime:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
 
+    def ping(self) -> dict[str, Any]:
+        """What this PROCESS started, not what a file says.
+
+        A flag read once at start - or, as XENTRY_START_OCI_MIRROR was, read
+        nowhere in the tree - is invisible otherwise, and the job that needs
+        it fails telling the operator to set something already set.
+        """
+        return {
+            "pong": True,
+            "mirror": self.start_mirror,
+            "apt_proxy": self.start_apt_proxy,
+            "registry_proxy": self.start_registry_proxy,
+            "oci_mirror": self.start_oci_mirror,
+            # The files THIS process reads. Both default to a path relative to
+            # the broker's working directory, so they can silently be a
+            # different copy from the app's - which is what
+            # "image artifact is unresolved" turned out to be.
+            "catalog_path": str(self.catalog_path.resolve()),
+            "steps_manifest": str(self.steps_manifest.resolve()),
+        }
+
+    def _stale(self, path: Path, key: str) -> bool:
+        """Has this file changed since it was last read into the cache?
+
+        Both of these were cached for the life of the process, and both change
+        under it: pinning an image rewrites the catalog and building one
+        rewrites the results. A broker started before the pin went on
+        answering "image artifact is unresolved: debian-11-generic-image"
+        while the catalog on disk said resolved - blaming the artifact for the
+        broker's own memory, and fixable only by a restart nobody knew to do.
+        """
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return False
+        if self._stamps.get(key) == stamp:
+            return False
+        self._stamps[key] = stamp
+        return True
+
     def _catalog_data(self) -> dict[str, dict[str, Any]]:
-        if self._catalog is None:
-            if not self.catalog_path.exists():
-                raise BrokerError("preflight_refused", f"missing artifact catalog: {self.catalog_path}")
+        if not self.catalog_path.exists():
+            raise BrokerError(
+                "preflight_refused", f"missing artifact catalog: {self.catalog_path}"
+            )
+        if self._catalog is None or self._stale(self.catalog_path, "catalog"):
+            # A re-pin of an image id this process already verified must be
+            # verified again: the path cache short-circuits the hash check.
+            self._image_cache.clear()
             data = yaml.safe_load(self.catalog_path.read_text(encoding="utf-8")) or {}
             artifacts = data.get("artifacts")
             if not isinstance(artifacts, dict):
@@ -187,10 +394,10 @@ class BrokerRuntime:
         return self._catalog
 
     def _results_data(self) -> dict[str, Any]:
-        if self._build_results is None:
-            path = self.image_dir / "build-results.json"
-            if not path.exists():
-                raise BrokerError("preflight_refused", f"missing image build results: {path}")
+        path = self.image_dir / "build-results.json"
+        if not path.exists():
+            raise BrokerError("preflight_refused", f"missing image build results: {path}")
+        if self._build_results is None or self._stale(path, "results"):
             self._build_results = json.loads(path.read_text(encoding="utf-8"))
         return self._build_results
 
@@ -209,7 +416,19 @@ class BrokerRuntime:
             path = self.image_dir / path
         artifact = self._catalog_data().get(artifact_id)
         if not isinstance(artifact, dict) or artifact.get("status") != "resolved":
-            raise BrokerError("preflight_refused", f"image artifact is unresolved: {artifact_id}")
+            # WHICH catalog. This said only "image artifact is unresolved:
+            # debian-11-generic-image" and was diagnosed twice as a stale
+            # cache, which it was not: the broker's WorkingDirectory is
+            # /opt/xentry-broker and this path defaults to a RELATIVE
+            # config/artifacts.yaml, so it read that tree's own copy - two
+            # days old, ten entries, and no such image - while the app read
+            # /opt/xentry/config/artifacts.yaml where the pin was.
+            raise BrokerError(
+                "preflight_refused",
+                f"image artifact is unresolved: {artifact_id} is "
+                f"{'absent from' if artifact is None else 'not resolved in'} "
+                f"{self.catalog_path} ({len(self._catalog_data())} entries)",
+            )
         if not path.exists():
             raise BrokerError("preflight_refused", f"image file is missing: {path}")
         actual = _sha256_file(path)
@@ -424,6 +643,10 @@ class BrokerRuntime:
             "role": role,
             "guest_ip": guest_ip,
             "mac": mac,
+            # Recorded so a rebuild knows which pinned image this VM was
+            # built from, without re-deriving it from the target definition.
+            "image_id": image_id,
+            "base_image": str(image),
             "overlay": str(overlay),
             "seed": str(seed),
             "xml": str(xml_path),
@@ -432,10 +655,7 @@ class BrokerRuntime:
             "serial_tcp_port": serial_tcp_port,
             "created_at": _now(),
         }
-        (vm_dir / "state.json").write_text(
-            json.dumps(state, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        self._write_json(vm_dir / "state.json", state)
         return {
             "vm_id": domain_name,
             "guest_ip": guest_ip,
@@ -444,10 +664,40 @@ class BrokerRuntime:
             "job_id": job_id,
         }
 
-    def _cleanup_network(self, network_name: str) -> None:
+    def _stop_services(self, job_id: str) -> dict[str, bool]:
+        """Stop every host service this job started, and say which there were.
+
+        One place, because there are four of them now - the artifact mirror,
+        the target's apt proxy, the registry proxy and the attacker's apt
+        proxy - and they are started one after another: a create_network that
+        failed on the fourth left the first three bound to a gateway address
+        the same call then destroyed, leaving orphaned threads holding a port
+        for the life of the broker with nothing to find them by.
+        """
+        stopped = {}
+        for label, table in (
+            ("mirror", self.mirrors),
+            ("apt_proxy", self.apt_proxies),
+            ("container_apt_proxy", self.container_proxies),
+            ("registry_proxy", self.registry_proxies),
+            ("attacker_apt_proxy", self.attacker_proxies),
+            ("oci_mirror", self.oci_mirrors),
+        ):
+            service: Any = table.pop(job_id, None)
+            if service is not None:
+                service.stop()
+            stopped[f"{label}_stopped"] = service is not None
+        return stopped
+
+    def _cleanup_network(self, network_name: str, table: str = TABLE) -> None:
+        # Drop the subnet claim, or a creation that failed holds its octet for
+        # the life of the host.
+        job_id = network_name.removeprefix("xentry-")
+        self._stop_services(job_id)
+        self._net_path(job_id).unlink(missing_ok=True)
         if self.apply_nft:
             try:
-                self.nft.clear()
+                self.nft.clear(table)
             except NftablesError:
                 pass
         try:
@@ -458,7 +708,14 @@ class BrokerRuntime:
         except LibvirtError:
             pass
 
-    def create_network(self, job_id: str, profile_id: str) -> dict[str, Any]:
+    def create_network(
+        self,
+        job_id: str,
+        profile_id: str,
+        apt_snapshot: str = "",
+        apt_archive: str = "",
+        registry_cutoff: str = "",
+    ) -> dict[str, Any]:
         try:
             resolve_profile(profile_id)
         except RegistryError as exc:
@@ -467,6 +724,13 @@ class BrokerRuntime:
             raise BrokerError("broker_registry_rejected", f"unsupported network profile: {profile_id}")
         job_dir = self._job_dir(job_id)
         network_name = f"xentry-{job_id}"
+        # A job keeps the octet it was given; a new one takes the lowest free.
+        recorded = self._net(job_id)
+        net = (
+            recorded
+            if recorded.octet
+            else JobNet.for_octet(self._allocate_octet(job_id), self.mirror_port)
+        )
         if self.virsh.network_exists(network_name):
             if not self.virsh.network_active(network_name):
                 try:
@@ -474,20 +738,14 @@ class BrokerRuntime:
                 except LibvirtError as exc:
                     raise BrokerError("network_create_failed", str(exc)) from exc
         else:
-            active = [
-                name
-                for name in self.virsh.list_networks()
-                if name.startswith("xentry-") and self.virsh.network_active(name)
-            ]
-            if active:
-                raise BrokerError("preflight_refused", f"active xentry network: {active}")
             xml = network_xml(
                 name=network_name,
-                bridge=BRIDGE,
+                bridge=net.bridge,
                 target_mac=TARGET_MAC,
-                target_ip=TARGET_IP,
+                target_ip=net.target_ip,
                 attacker_mac=ATTACKER_MAC,
-                attacker_ip=ATTACKER_IP,
+                attacker_ip=net.attacker_ip,
+                gateway=net.gateway,
             )
             xml_path = job_dir / "network.xml"
             xml_path.write_text(xml, encoding="utf-8")
@@ -498,7 +756,23 @@ class BrokerRuntime:
                 raise BrokerError("network_create_failed", str(exc)) from exc
         if self.apply_nft:
             try:
-                self.nft.apply(provisioning_rules(bridge=BRIDGE))
+                self.nft.apply(
+                    provisioning_rules(
+                        bridge=net.bridge,
+                        mirror_ip=net.gateway,
+                        mirror_port=self.mirror_port,
+                        table=net.table,
+                        apt_port=self.apt_port if self.start_apt_proxy else None,
+                        attacker_apt_port=(
+                            self.attacker_apt_port if self.start_apt_proxy else None
+                        ),
+                        oci_port=self.oci_port if self.start_oci_mirror else None,
+                        registry_port=(
+                            self.registry_port if self.start_registry_proxy else None
+                        ),
+                    ),
+                    table=net.table,
+                )
             except NftablesError as exc:
                 try:
                     self.virsh.network_destroy(network_name)
@@ -506,40 +780,183 @@ class BrokerRuntime:
                 except LibvirtError:
                     pass
                 raise BrokerError("network_create_failed", str(exc)) from exc
-        mirror_url = MIRROR_URL
+        mirror_url = net.mirror_url
         mirror_started = False
         if self.start_mirror:
             if self.manifest_path is None:
-                self._cleanup_network(network_name)
+                self._cleanup_network(network_name, net.table)
                 raise BrokerError("preflight_refused", "artifact mirror manifest is not configured")
-            if self.mirror is None:
+            if job_id not in self.mirrors:
                 try:
                     mirror = ArtifactMirror(
                         self.manifest_path,
-                        bind=self.mirror_bind,
+                        bind=self.mirror_bind or net.gateway,
                         port=self.mirror_port,
                     )
                     mirror.start()
-                    self.mirror = mirror
+                    self.mirrors[job_id] = mirror
                 except (MirrorError, OSError) as exc:
-                    self._cleanup_network(network_name)
+                    self._cleanup_network(network_name, net.table)
                     raise BrokerError("network_create_failed", str(exc)) from exc
-            mirror_url = self.mirror.url
+            mirror_url = self.mirrors[job_id].url
             mirror_started = True
+        apt_proxy_url = ""
+        attacker_apt_proxy_url = ""
+        attacker_snapshot = ""
+        # Not named apt_snapshot: that is the requested serial, and a local of
+        # the same name would discard it before the proxy is built.
+        snapshot_used = ""
+        archive_used = ""
+        container_apt_host = ""
+        if self.start_apt_proxy:
+            if job_id not in self.apt_proxies:
+                try:
+                    # The app chooses the serial from the advisory date; the
+                    # broker is what checks it and what inserts it into every
+                    # upstream path, so the guest still cannot pick one.
+                    proxy = AptSnapshotProxy(
+                        self.apt_cache,
+                        bind=self.mirror_bind or net.gateway,
+                        port=self.apt_port,
+                        serial=apt_snapshot or None,
+                        archive=apt_archive or "ubuntu",
+                    )
+                    proxy.start()
+                    self.apt_proxies[job_id] = proxy
+                    # A SECOND listener on port 80, same cache and serial, for
+                    # a container's apt. `docker build` takes no volume flag
+                    # and the image's own sources.list is what apt reads, so
+                    # the only way to point it here is to answer on the host
+                    # and port that file already names: deb.debian.org:80, via
+                    # --add-host. One job runs at a time, so nothing else holds
+                    # 80; if something does, the dockerfile path is refused
+                    # rather than the whole job.
+                    try:
+                        container = AptSnapshotProxy(
+                            self.apt_cache,
+                            bind=self.mirror_bind or net.gateway,
+                            port=80,
+                            serial=apt_snapshot or None,
+                            archive=apt_archive or "ubuntu",
+                        )
+                        container.start()
+                        self.container_proxies[job_id] = container
+                    except (AptProxyError, OSError):
+                        pass
+                except AptProxyError as exc:
+                    self._cleanup_network(network_name, net.table)
+                    raise BrokerError("broker_registry_rejected", str(exc)) from exc
+                except OSError as exc:
+                    self._cleanup_network(network_name, net.table)
+                    raise BrokerError("network_create_failed", str(exc)) from exc
+            apt_proxy_url = self.apt_proxies[job_id].url
+            held = self.container_proxies.get(job_id)
+            container_apt_host = held.bind if held else ""
+            # Reported so the runner records which snapshot provisioned this
+            # target: without the serial, "it installed apache2" says nothing
+            # about which apache2.
+            snapshot_used = self.apt_proxies[job_id].serial
+            # Which archive, not only which serial: the same serial means two
+            # different package sets in Ubuntu and Debian.
+            archive_used = self.apt_proxies[job_id].archive.name
+            # The attacker's archive, beside the target's. Ubuntu at the
+            # current serial, because the attacker image is noble and its
+            # tooling is not what the experiment measures; the target's serial
+            # is the advisory's and is frequently neither Ubuntu nor current.
+            if job_id not in self.attacker_proxies:
+                try:
+                    attacker = AptSnapshotProxy(
+                        self.apt_cache,
+                        bind=self.mirror_bind or net.gateway,
+                        port=self.attacker_apt_port,
+                        serial=None,
+                        archive="ubuntu",
+                    )
+                    attacker.start()
+                    self.attacker_proxies[job_id] = attacker
+                except (AptProxyError, OSError) as exc:
+                    self._cleanup_network(network_name, net.table)
+                    raise BrokerError("network_create_failed", str(exc)) from exc
+            attacker_apt_proxy_url = self.attacker_proxies[job_id].url
+            attacker_snapshot = self.attacker_proxies[job_id].serial
+        oci_mirror_url = ""
+        if self.start_oci_mirror:
+            if job_id not in self.oci_mirrors:
+                try:
+                    # `oci`, not `mirror`: that name already holds the
+                    # artifact mirror in this function, and reusing it made
+                    # mypy read the two as one variable of one type.
+                    oci = OciMirror(
+                        self.oci_cache,
+                        bind=self.mirror_bind or net.gateway,
+                        port=self.oci_port,
+                    )
+                    oci.start()
+                    self.oci_mirrors[job_id] = oci
+                except (OciProxyError, OSError) as exc:
+                    self._cleanup_network(network_name, net.table)
+                    raise BrokerError("network_create_failed", str(exc)) from exc
+            oci_mirror_url = self.oci_mirrors[job_id].url
+        registry_proxy_url = ""
+        cutoff_used = ""
+        if self.start_registry_proxy and registry_cutoff:
+            # No cutoff means no ecosystem target on this job, so no proxy: an
+            # unpinned registry is the one thing this must never serve.
+            if job_id not in self.registry_proxies:
+                try:
+                    registry = RegistryProxy(
+                        self.registry_cache,
+                        bind=self.mirror_bind or net.gateway,
+                        port=self.registry_port,
+                        cutoff=registry_cutoff,
+                    )
+                    registry.start()
+                    self.registry_proxies[job_id] = registry
+                except RegistryProxyError as exc:
+                    self._cleanup_network(network_name, net.table)
+                    raise BrokerError("broker_registry_rejected", str(exc)) from exc
+                except OSError as exc:
+                    self._cleanup_network(network_name, net.table)
+                    raise BrokerError("network_create_failed", str(exc)) from exc
+            registry_proxy_url = self.registry_proxies[job_id].url
+            # Recorded for the same reason the apt serial is: without the date,
+            # "it installed next 16.4.0" says nothing about why that version.
+            cutoff_used = self.registry_proxies[job_id].cutoff
         state = {
             "network_id": network_name,
             "job_id": job_id,
-            "bridge": BRIDGE,
-            "subnet": "10.42.0.0/24",
+            "octet": net.octet,
+            "bridge": net.bridge,
+            "subnet": net.subnet,
+            "table": net.table,
+            "gateway": net.gateway,
+            "target_ip": net.target_ip,
+            "attacker_ip": net.attacker_ip,
             "mirror_url": mirror_url,
             "mirror_started": mirror_started,
+            "apt_proxy_url": apt_proxy_url,
+            "apt_snapshot": snapshot_used,
+            "apt_archive": archive_used,
+            # deb822 needs the archive's own path and its own freshness rule.
+            "apt_suite_path": f"/{archive_used}" if archive_used else "",
+            "apt_check_valid_until": (
+                self.apt_proxies[job_id].archive.check_valid_until
+                if archive_used
+                else True
+            ),
+            # Reported so the runner can provision the attacker from it, and
+            # so the record says which serial armed the attacker as well as
+            # which one built the target.
+            "attacker_apt_proxy_url": attacker_apt_proxy_url,
+            "attacker_apt_snapshot": attacker_snapshot,
+            "oci_mirror_url": oci_mirror_url,
+            "container_apt_host": container_apt_host,
+            "registry_proxy_url": registry_proxy_url,
+            "registry_cutoff": cutoff_used,
             "nft_applied": self.apply_nft,
             "created_at": _now(),
         }
-        (job_dir / "network.json").write_text(
-            json.dumps(state, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        self._write_json(job_dir / "network.json", state)
         return state
 
     def create_target(self, job_id: str, target_id: str, image_id: str) -> dict[str, Any]:
@@ -547,10 +964,16 @@ class BrokerRuntime:
             resolve_target(target_id)
         except RegistryError as exc:
             raise BrokerError("broker_registry_rejected", str(exc)) from exc
-        if image_id != TARGET_IMAGES[target_id]:
+        allowed = TARGET_IMAGES.get(target_id)
+        if not allowed or target_id not in TARGET_PROFILES:
+            # resolve_target passed, so the registry and these tables disagree.
+            raise BrokerError(
+                "broker_registry_rejected", f"no image or profile for target: {target_id}"
+            )
+        if image_id not in allowed:
             raise BrokerError(
                 "broker_registry_rejected",
-                f"{target_id} requires image {TARGET_IMAGES[target_id]}",
+                f"{target_id} requires one of {', '.join(allowed)}",
             )
         return self._create_vm(
             job_id=job_id,
@@ -581,6 +1004,65 @@ class BrokerRuntime:
             mac=ATTACKER_MAC,
             failure_code="attacker_create_failed",
         )
+
+    def _net_path(self, job_id: str) -> Path:
+        return self._job_dir(job_id) / "network.json"
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        # Written to a sibling and renamed, because write_text truncates first.
+        # A concurrent reader scanning for claimed subnets would otherwise read
+        # the empty window, fail to parse it, skip the file, and hand that
+        # subnet to a second job. os.replace is atomic within a directory, so a
+        # reader sees either the whole old file or the whole new one.
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _allocate_octet(self, job_id: str) -> int:
+        # Two workers can ask at once and the pick reads files, so the choice
+        # and the claim have to happen together: an unrecorded choice is
+        # invisible to the next caller, and both get the same subnet.
+        with self._alloc_lock:
+            octet = self._pick_octet(job_id)
+            path = self._net_path(job_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_json(path, {"octet": octet})
+            return octet
+
+    def _pick_octet(self, job_id: str) -> int:
+        # The lowest free octet, so a torn-down job's subnet comes back into
+        # use. Taken means another job claims it and its network still exists.
+        taken: set[int] = set()
+        for path in self.jobs_root.glob("*/network.json"):
+            if path.parent.name == job_id:
+                continue
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                # Writes are atomic, so this is a genuinely corrupt file rather
+                # than one being written right now.
+                continue
+            octet = state.get("octet")
+            name = str(state.get("network_id") or "")
+            if isinstance(octet, int) and (not name or self.virsh.network_exists(name)):
+                taken.add(octet)
+        for octet in range(1, 255):
+            if octet not in taken:
+                return octet
+        raise BrokerError("network_create_failed", "no free job subnet")
+
+    def _net(self, job_id: str) -> JobNet:
+        try:
+            state = json.loads(self._net_path(job_id).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        octet = state.get("octet")
+        if isinstance(octet, int):
+            return JobNet.for_octet(octet, self.mirror_port)
+        # A job created before per-job networks has no octet recorded, so it
+        # keeps the single fixed segment it was built on.
+        return JobNet(0, BRIDGE, "10.42.0.1", TARGET_IP, ATTACKER_IP, TABLE, MIRROR_URL)
 
     def _vm_state(self, vm_id: str) -> dict[str, Any] | None:
         for state_path in self.jobs_root.glob("*/*/state.json"):
@@ -656,6 +1138,7 @@ class BrokerRuntime:
         inner_params: dict[str, Any],
         tty: bool,
         timeout_s: int,
+        trace: bool = False,
     ) -> dict[str, Any]:
         spec = self._steps().get(step_id)
         try:
@@ -694,6 +1177,15 @@ class BrokerRuntime:
             prepared = prep_ssh.run("install -d -m 0755 /var/lib/xentry/steps")
             if prepared.exit_code != 0:
                 raise BrokerError("provision_failed", prepared.stderr.strip())
+            if trace:
+                # Root makes the directory and hands it to the step's user, so
+                # the redirect can create the trace file whoever the step runs
+                # as.
+                owned = prep_ssh.run(
+                    f"install -d -m 0750 -o {shlex.quote(spec.user)} {shlex.quote(GUEST_TRACE_DIR)}"
+                )
+                if owned.exit_code != 0:
+                    raise BrokerError("provision_failed", owned.stderr.strip())
             prep_ssh.put(local_script, remote_script)
             checked = prep_ssh.run(
                 f"chmod 0755 {shlex.quote(remote_script)}; sha256sum {shlex.quote(remote_script)}"
@@ -703,9 +1195,7 @@ class BrokerRuntime:
             remote_sha = checked.stdout.strip().split()[0] if checked.stdout.strip() else ""
             if remote_sha != spec.sha256:
                 raise BrokerError("artifact_hash_mismatch", f"remote step script mismatch: {step_id}")
-            command = f"bash {shlex.quote(remote_script)}"
-            if values:
-                command += " " + " ".join(shlex.quote(value) for value in values)
+            command = step_command(remote_script, list(values), step_id, trace)
             result = (
                 run_ssh.run_tty(command, timeout_s=float(effective_timeout))
                 if use_tty
@@ -758,11 +1248,71 @@ class BrokerRuntime:
             raise BrokerError("preflight_refused", "artifact manifest has no artifacts")
         return artifacts
 
+    def stage_artifact(
+        self, job_id: str, artifact_id: str, path: str, sha256: str
+    ) -> dict[str, Any]:
+        """Admit one job-scoped artifact: a PoC nobody pinned in advance.
+
+        The checked-in targets name artifacts in a catalog whose digests came
+        from vendor checksums out of band. An arbitrary PoC repository has no
+        such digest, so the app records the bytes it fetched and hands them
+        over with their digest; the broker verifies that digest, copies the
+        file into the job's own directory, and scopes the registration to that
+        job. It never leaves the job's tree and never joins the global catalog,
+        so one job cannot name another's artifact or shadow a pinned one.
+        """
+        if not JOB_ID_RE.fullmatch(job_id):
+            raise BrokerError("broker_registry_rejected", "invalid job_id")
+        if not STAGED_ID_RE.fullmatch(artifact_id):
+            raise BrokerError("broker_registry_rejected", f"invalid artifact_id: {artifact_id}")
+        if artifact_id in self._artifact_manifest():
+            raise BrokerError("broker_registry_rejected", f"artifact_id is pinned: {artifact_id}")
+        if not SHA256_RE.fullmatch(sha256):
+            raise BrokerError("broker_registry_rejected", "invalid sha256")
+        source = Path(path)
+        job_dir = self._job_dir(job_id)
+        # The app may only hand over a file from this job's own directory: any
+        # other path would make this verb a root-privileged read of anywhere.
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(job_dir.resolve())
+        except (OSError, ValueError) as exc:
+            raise BrokerError(
+                "broker_registry_rejected", f"artifact is not in the job directory: {path}"
+            ) from exc
+        if _sha256_file(resolved) != sha256:
+            raise BrokerError("artifact_hash_mismatch", f"staged artifact does not match: {path}")
+        staged_dir = job_dir / "staged"
+        staged_dir.mkdir(parents=True, exist_ok=True)
+        staged_dir.chmod(0o750)
+        target = staged_dir / artifact_id
+        shutil.copyfile(resolved, target)
+        target.chmod(0o640)
+        self._write_json(
+            job_dir / "staged.json",
+            {
+                **self._staged(job_id),
+                artifact_id: {"path": str(target), "sha256": sha256, "staged_at": _now()},
+            },
+        )
+        return {"artifact_id": artifact_id, "sha256": sha256, "job_id": job_id}
+
+    def _staged(self, job_id: str) -> dict[str, Any]:
+        path = self._job_dir(job_id) / "staged.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def copy_in(self, vm_id: str, artifact_id: str, guest_path: str) -> dict[str, Any]:
         state = self._vm_state(vm_id)
         if state is None:
             raise BrokerError("broker_registry_rejected", f"unknown vm_id: {vm_id}")
-        entry = self._artifact_manifest().get(artifact_id)
+        # The pinned catalog first, so a staged id can never shadow one.
+        entry: Any = self._artifact_manifest().get(artifact_id)
+        if entry is None:
+            entry = self._staged(str(state["job_id"])).get(artifact_id)
         if not isinstance(entry, dict) or not entry.get("path"):
             raise BrokerError("broker_registry_rejected", f"unknown artifact_id: {artifact_id}")
         local_path = Path(str(entry["path"]))
@@ -819,6 +1369,17 @@ class BrokerRuntime:
             raise BrokerError("harness_error", str(exc)) from exc
         if not local.is_file():
             raise BrokerError("harness_error", "copy_out produced no file")
+        # The unit runs with UMask=0077, which masks the mode handed to mkdir, so
+        # the directory lands 0700 and the fetched file 0600. The app is what
+        # consumes copy_out and the broker's primary group is already the app's,
+        # so the modes are set explicitly here - the same reason capture_dir is
+        # chmodded after its mkdir below.
+        try:
+            for directory in (out_root, local.parent):
+                directory.chmod(0o750)
+            local.chmod(0o640)
+        except OSError as exc:
+            raise BrokerError("harness_error", f"cannot share copy_out result: {exc}") from exc
         return {
             "vm_id": vm_id,
             "artifact_id": uuid.uuid4().hex,
@@ -919,7 +1480,7 @@ class BrokerRuntime:
                 text = parse_capture(
                     output_path,
                     guest_ip,
-                    attacker_ip=ATTACKER_IP,
+                    attacker_ip=self._net(str(state["job_id"])).attacker_ip,
                     target_port=target_port,
                 )
             except CaptureError as exc:
@@ -940,7 +1501,7 @@ class BrokerRuntime:
                 text = parse_capture(
                     output_path,
                     guest_ip,
-                    attacker_ip=ATTACKER_IP,
+                    attacker_ip=self._net(str(state["job_id"])).attacker_ip,
                     target_port=target_port,
                 )
             except CaptureError as exc:
@@ -1074,6 +1635,7 @@ class BrokerRuntime:
     def destroy_vm(self, vm_id: str) -> dict[str, Any]:
         if not VM_ID_RE.fullmatch(vm_id):
             raise BrokerError("broker_registry_rejected", "invalid vm_id")
+        result: dict[str, Any] = {"destroyed": True, "vm_id": vm_id}
         capture = self._serial_captures.pop(vm_id, None)
         if capture is not None:
             capture.stop()
@@ -1107,14 +1669,50 @@ class BrokerRuntime:
                 continue
             if not any(job_dir.glob("*/state.json")):
                 shutil.rmtree(job_dir / "keys", ignore_errors=True)
-        return {"destroyed": True, "vm_id": vm_id}
+        return result
+
+    def lock_network(self, job_id: str, target_ports: list[int]) -> dict[str, Any]:
+        """Replace the provisioning ruleset with the locked one.
+
+        Called after readiness and before any PoC code runs. Two things go away
+        together: the rules that let a guest reach the host's mirror and apt
+        proxy, and the services themselves. Stopping them is not redundant - it
+        is what makes the guarantee hold if a rule is ever wrong, and the job
+        has no further use for either.
+        """
+        net = self._net(job_id)
+        ports = sorted({int(port) for port in target_ports})
+        for port in ports:
+            if port < 1 or port > 65535:
+                raise BrokerError("broker_registry_rejected", f"invalid target port: {port}")
+        if self.apply_nft:
+            try:
+                self.nft.apply(
+                    locked_rules(
+                        ports,
+                        bridge=net.bridge,
+                        target_ip=net.target_ip,
+                        attacker_ip=net.attacker_ip,
+                        table=net.table,
+                    ),
+                    table=net.table,
+                )
+            except NftablesError as exc:
+                raise BrokerError("network_lock_failed", str(exc)) from exc
+        return {
+            "locked": True,
+            "target_ports": ports,
+            "table": net.table,
+            **self._stop_services(job_id),
+            "nft_applied": bool(self.apply_nft),
+        }
 
     def destroy_network(self, network_id: str) -> dict[str, Any]:
         if not VM_ID_RE.fullmatch(network_id):
             raise BrokerError("broker_registry_rejected", "invalid network_id")
-        if self.mirror is not None:
-            self.mirror.stop()
-            self.mirror = None
+        job_id = network_id.removeprefix("xentry-")
+        net = self._net(job_id)
+        self._stop_services(job_id)
         if self.virsh.network_exists(network_id):
             try:
                 if self.virsh.network_active(network_id):
@@ -1124,7 +1722,7 @@ class BrokerRuntime:
                 raise BrokerError("teardown_failed", str(exc)) from exc
         if self.apply_nft:
             try:
-                self.nft.clear()
+                self.nft.clear(net.table)
             except NftablesError as exc:
                 raise BrokerError("teardown_failed", str(exc)) from exc
         for state_path in self.jobs_root.glob("*/network.json"):
@@ -1156,11 +1754,23 @@ class BrokerRuntime:
         return {"domains": domains, "networks": networks}
 
     def handle(self, verb: str, params: dict[str, Any]) -> dict[str, Any]:
+        if verb == "ping":
+            return self.ping()
         if verb == "create_network":
             return self.create_network(
                 _text(params, "job_id"),
                 _text(params, "profile_id"),
+                _text(params, "apt_snapshot") if params.get("apt_snapshot") else "",
+                _text(params, "apt_archive") if params.get("apt_archive") else "",
+                _text(params, "registry_cutoff") if params.get("registry_cutoff") else "",
             )
+        if verb == "lock_network":
+            ports = params.get("target_ports", [])
+            if not isinstance(ports, list) or not all(isinstance(p, int) for p in ports):
+                raise BrokerError("broker_registry_rejected", "target_ports must be integers")
+            if len(ports) > 16:
+                raise BrokerError("broker_registry_rejected", "too many target ports")
+            return self.lock_network(_text(params, "job_id"), ports)
         if verb == "create_target":
             return self.create_target(
                 _text(params, "job_id"),
@@ -1172,6 +1782,13 @@ class BrokerRuntime:
                 _text(params, "job_id"),
                 _text(params, "profile_id"),
                 _text(params, "image_id"),
+            )
+        if verb == "stage_artifact":
+            return self.stage_artifact(
+                _text(params, "job_id"),
+                _text(params, "artifact_id"),
+                _text(params, "path"),
+                _text(params, "sha256"),
             )
         if verb == "exec":
             inner = params.get("params", {})
@@ -1186,12 +1803,16 @@ class BrokerRuntime:
             tty = params.get("tty", False)
             if not isinstance(tty, bool):
                 raise BrokerError("broker_registry_rejected", "invalid tty")
+            trace = params.get("trace", False)
+            if not isinstance(trace, bool):
+                raise BrokerError("broker_registry_rejected", "invalid trace")
             return self.exec_step(
                 _text(params, "vm_id"),
                 _text(params, "step_id"),
                 inner,
                 tty,
                 _integer(params, "timeout_s", 1, 3600),
+                trace,
             )
         if verb == "place_nonce":
             return self.place_nonce(

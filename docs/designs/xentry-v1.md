@@ -27,17 +27,17 @@ V1 does not solve that problem deterministically. It uses an attacker VM for rem
 * **G1. Local operation.** Bind `127.0.0.1`. One or two users, no accounts. Every non-GET request requires a request-integrity token, with CSRF, Origin, and Host checks. A second remote user connects through an SSH local port forward.
 * **G2. Bounded input.** Accept a CVE link and a PoC link, detect the source shape, fetch a bounded evidence bundle, store raw bytes and hashes, and reject unsupported sources, CVEs, and PoCs before creating a VM or network.
 * **G3. Runner-owned pipeline.** The runner owns the ordered steps: fetch, extract, plan, create network, create target, provision, readiness, create attacker for remote PoCs, build PoC, freeze, place nonce, null actor, probe, restore or reboot, fresh nonce, real actor, target probe, host evidence, destroy attacker, destroy target, destroy network, validate, project. The model is invoked only for extraction.
-* **G4. Two-VM harness.** System libvirt through a root-owned broker runs one target VM and, for remote PoCs, one lightweight attacker VM. The broker exposes fixed verbs and fixed domain templates. The two VMs share one isolated libvirt network with no host LAN or internet route after provisioning. No container runtime is used.
-* **G5. Typed targets.** V1 uses three checked-in `Target` instances in `src/xentry/targets.py`, not a generic YAML pack layer. Each instance declares its image, kernel, resources, actor, setup script and hash, pinned PoC, ordered probe steps, nonce, null actor, evidence channel, retry policy, timeouts, and claim limits. `script_source` is `checked_in` for all three; `generated` is V1.1.
+* **G4. Two-VM harness.** System libvirt through a root-owned broker runs one target VM and, for remote PoCs, one lightweight attacker VM. The broker exposes fixed verbs and fixed domain templates. The two VMs share one isolated libvirt network with no host LAN or internet route after provisioning. Provisioning may reach two host services on the job's own bridge gateway - the artifact mirror and the pinned apt mirror - and neither is a route off the bridge: the host fetches, the guest does not. No container runtime is used.
+* **G5. Typed targets.** V1 uses three checked-in `Target` instances in `src/xentry/targets.py`, not a generic YAML pack layer. Each instance declares its image, kernel, resources, actor, setup script and hash, pinned PoC, ordered probe steps, nonce, null actor, evidence channel, retry policy, timeouts, and claim limits. `script_source` is `checked_in` for all three; `generated` is V1.1. A fourth kind of target is *derived* at admission from extracted facts (`src/xentry/generic.py`), for a CVE nobody wired by hand. It is still built only from checked-in, hashed scripts - the model supplies parameters from a closed vocabulary, never a command, so `script_source` stays `checked_in` - and it is admitted only when one fixed evidence design fits, with its weaker standing stated in the plan and the verdict.
 * **G6. Causal evidence.** The runner generates a fresh 128-bit nonce after the freeze, places it through a broker verb that sets owner and mode, and keeps the value runner-only. A null actor runs the same wrapper without the exploit and must not observe the nonce. For remote PoCs, the attacker runs the PoC and the runner observes the target-side nonce. For Dirty Frag, the runner captures host-side evidence and records the guest-attested limit. The LLM cannot return `reproduced` without `nonce_observed`.
 * **G7. Execution isolation.** No PoC code is built or executed on the host. Remote PoCs run in the attacker VM as `xentry-guest`. Dirty Frag runs in the target VM as `xentry-guest`; its root shell is spawned by the PoC, not by the broker. All three setup scripts run as `root`, allowlisted by step id. `xentry-guest` has no sudo, setuid, pkexec, shared SSH key, or writable root-owned path. No host mounts, devices, shared folders, or containers.
-* **G8. Job lifecycle.** Jobs are asynchronous, cancellable, recoverable, and recorded as an ordered step list plus `outcome` and `cleanup_state`. One job runs at a time; a job may use two VMs. Every path destroys both VMs and the network before validation.
+* **G8. Job lifecycle.** Jobs are asynchronous, cancellable, recoverable, and recorded as an ordered step list plus `outcome` and `cleanup_state`. One job runs at a time; a job may use two VMs. Every path destroys both VMs and the network before validation. A rebuilt environment (below) is not a job: it is never validated, so it cannot reach the step this gate guards, and it holds no claim that teardown could contaminate.
 * **G9. Storage and audit.** The per-job attempt directory and append-only JSONL are authoritative. SQLite is a rebuildable index with the DDL below. Failed jobs are retained; secrets are redacted; the audit bundle reconstructs the job.
 * **G10. Honest UI.** Job state, verdict, and authority are separate fields. "Succeeded" and "verified" are banned. The agent summary is labeled non-authoritative. The pre-run plan shows the target, attacker (if any), network, nonce path, probe, evidence channel, and caps.
 * **G11. Budgets and failure codes.** Per-target time, memory, disk, token, and VM-cycle caps are enforced. Every failure has a closed code and a next action. Retries cover transient infrastructure only.
 * **G12. Testability.** A fake broker/driver covers the lifecycle without KVM. Validator fixtures, scripted model clients, a prompt-injection corpus, a null-actor test, a broker-contract test, a budget test, and a kill-and-restart test are part of V1.
 * **G13. Operational readiness.** The app runs from a local virtual environment and a systemd user unit. The broker runs as a separate root-owned systemd unit. The database has a schema version, forward-only migrations, a backup before migration, and a documented backup-restore rollback.
-* **G14. Scope discipline.** The budget below is binding. Revision 5 raises it to match the owner's choice of all three targets and the attacker VM. Any further growth requires an explicit budget change and an ADR entry.
+* **G14. Scope discipline.** The budget below is binding. Revision 5 raises it to match the owner's choice of all three targets and the attacker VM. Any further growth requires an explicit budget change and an ADR entry. Raises since: 8,600 and 9,400 for per-job networks, rebuilt environments and the pinned apt mirror; 9,800 for derived targets (ADR entry 12); 10,200 for the release matrix (ADR entry 13); 10,800 lines and 48 modules for the experimental generated-PoC pipeline (ADR entry 14); 11,000 lines and 49 modules for ecosystem targets - a Dockerfile read as evidence rather than run, and the package it names resolved on the host, pinned by digest and served by the existing mirror (ADR entry 15); 11,300 lines, still 49 modules, for the fixed-version control run that turns a derived reproduction from "the exploit works here" into "the vulnerability is why" (ADR entries 16-18); 11,500 lines, still 49 modules, for the selection path that lets a pasted CVE reach an ecosystem target at all (ADR entry 19); 11,900 lines and 50 modules for the dated registry mirror, which reverses the "no registry proxy" of entry 15b and removes the per-ecosystem image with it (ADR entry 20); 12,100 lines, still 50 modules, for Debian as a second apt archive, which is what lets a derived target reach a version Ubuntu never published (ADR entry 21); 12,400 lines, still 50 modules, for an operator-approved download, offered only after every archive has been tried and refused for that one reason (ADR entry 22).
 
 ## Non-Goals
 
@@ -62,7 +62,7 @@ The budget is binding and raised for the two-VM/broker decision. The counting ru
 
 | Dimension | V1 budget |
 | --- | --- |
-| Handwritten Python | At most 8,000 lines across at most 44 modules (the headroom covers the broker registry, actor-separation tests, and image-build script) |
+| Handwritten Python | At most 10,800 lines across at most 48 modules. Raised from 8,000 in steps, each recorded below; `tests/test_budget.py` holds the current cap |
 | Per-component allocation | Web/API/UI 1,000; runner/queue/cleanup 1,100; broker client and broker 1,500; VM/network/mirror/host evidence 1,300; ingestion/evidence 650; extractor/validator 650; storage/security/events/bundle 800; scripts 650; target/profile instances 350 |
 | Templates and static | At most 1,500 lines |
 | Tests | At most 4,500 lines |
@@ -243,9 +243,170 @@ mirror: 10.<slot>.0.1:8081 (host bridge gateway, broker-managed)
 
 There is no host LAN or internet route. Host access is limited to the broker, the mirror on the bridge gateway, and the loopback port forward.
 
-Provisioning phase: nftables allows target→mirror only; the mirror serves the job's pinned PHP source, GitLab `.deb`, kernel image and modules `.deb`s, and PoC artifacts from `config/artifacts.yaml`. The mirror is a static broker-managed service on the fixed `10.42.0.1:8081`; it serves no apt index. Apt dependencies are baked into the target and attacker images by `scripts/build-images.sh`. After provisioning: default-deny; allow attacker→target on `target_ports` and broker→target SSH/probe; deny all other egress. `run_egress_test` fails closed and logs attempts.
+Provisioning phase: nftables allows target→mirror and, when it is enabled, target→apt-mirror; the artifact mirror serves the job's pinned PHP source, GitLab `.deb`, kernel image and modules `.deb`s, and PoC artifacts from `config/artifacts.yaml`. The artifact mirror is a broker-managed service on the job's bridge gateway; it serves no apt index. The three checked-in targets need none: their apt dependencies are baked into the images by `scripts/build-images.sh`. Locked phase: `lock_network` replaces the provisioning ruleset after readiness and before any PoC code runs, leaving attacker→target on `target_ports` plus DHCP/DNS, and stops the mirror and the apt proxy for that job. The two phases hook both `forward` and `input`: the mirror and the apt proxy bind the job's gateway, which is the host's own address on the bridge, so packets to them are delivered locally and never traverse `forward` - a locked phase that replaced only the forward chain would have closed nothing. The `input` chain carries policy accept with every rule scoped by `iifname` and a final drop on the job bridge, because a base chain's policy applies to every packet reaching its hook and policy drop there would take the operator's own ssh with it. An environment is held for an operator and runs no PoC, so it keeps its provisioning path. `run_egress_test` fails closed and logs attempts.
 
 The artifact catalog is the single source of truth for image, package, kernel, and PoC pins. `scripts/fetch-artifacts.sh` seeds it from vendor checksums/signatures and refuses to write a new pin without an out-of-band value. `config/image-manifests.yaml` records the packages baked into each target image; `scripts/build-images.sh` builds the images. The attacker image preinstalls Go and Python `requests`; the PoC fetches nothing at run time.
+
+### Derived targets
+
+A CVE with no checked-in target is admitted only if one fixed evidence design
+fits it, and refused with `no_observable` otherwise. The design is the
+attacker's own transcript:
+
+```text
+nonce:     /var/lib/xentry/nonce on the target, root:root 0644
+control:   null-generic on the attacker - a plain request, must not print it
+real:      run-poc-generic on the attacker - must print it
+channel:   attacker_transcript (stdout+stderr), hashed
+authority: guest_attested+llm_assessed, never runner_observed
+```
+
+The nonce is world-readable and root-owned on purpose. The control runs on the
+attacker, which reaches the target only over the network where nothing serves
+that file, so any code execution or arbitrary read on the target can see it and
+nothing else can. That makes the claim "the PoC obtained read access on the
+target" without guessing which user the vulnerable service runs as - a guess
+that would turn real reproductions into failed probes.
+
+Admission requires `poc_context == "remote"`, between one and eight usable
+ports, a protocol of http/https/tcp, and an entrypoint the extractor read in
+the PoC's own text. There is no autodetection of the entrypoint: a repository
+with two plausible scripts would have the choice made for it, and that choice
+decides what "the PoC" means for the verdict.
+
+Nothing the model returns becomes a command. `setup-generic` takes a package
+list and a unit list, each token checked against a strict pattern by the app
+and again by the script, and installs from the pinned apt snapshot; a wrong
+package is a failed provision, not arbitrary root execution. The five steps
+(`setup-generic`, `readiness-generic`, `build-poc-generic`, `run-poc-generic`,
+`null-generic`) are checked in and hashed like every other step.
+
+The PoC itself is a repository nobody pinned, so `stage_poc` fetches the GitHub
+tarball host-side, records the bytes as evidence, and hands them to the broker
+with their digest; the broker re-verifies it, keeps the file inside that job's
+directory and scopes the registration to that job, so one job cannot name
+another's artifact or shadow a pinned one. The pin therefore says "these are
+the bytes that ran", not "these are the bytes the vendor published".
+
+What a derived job does not establish is recorded with it: no version was
+verified against the advisory, nothing on the target was observed, a PoC that
+fabricated the value would look the same, and no human reviewed its setup,
+readiness or evidence design. Those lines are in the plan the reader approves
+before anything runs, not only in the verdict afterwards.
+
+### Experimental pipeline: a generated PoC
+
+`/experiments` takes a CVE link and nothing else. The pipeline is the derived
+target's, with the PoC phase replaced: `author_poc` hands the advisory text,
+the extracted facts and the built target's address to `XENTRY_POC_MODEL` and
+gets back one Python file. Any litellm provider works; a local `llama.cpp`
+server is driven with an `openai/`-prefixed model and `XENTRY_POC_API_BASE`.
+
+Two things the replacement does not change, and one it does.
+
+The boundary does not move. The generated file is tarred, staged with its
+digest through the same `stage_artifact` verb a GitHub PoC uses, unpacked by the
+same checked-in `build-poc-generic` step and run by the same
+`run-poc-generic` step as `xentry-guest`, in the same disposable attacker VM on
+the same isolated network. Running a stranger's exploit from GitHub already had
+that posture; what differs is provenance, not privilege.
+
+The evidence does not weaken. The nonce is placed by the broker on the
+*target*, is runner-only, and is never part of any prompt - so generated code
+cannot print it without actually reading it, and the control run on the attacker
+still has to come up empty. A failed attempt may be rewritten
+(`XENTRY_POC_ATTEMPTS`, default 3, clamped to 1-10) with the previous output fed
+back **after redaction**: that text can quote the nonce, and handing it to the
+author would let the next attempt print a value it never read. Each attempt
+places a fresh nonce and restores the frozen snapshot first, so one attempt's
+broken service does not decide the next one's outcome.
+
+What it does change is pinning: nothing about the exploit is pinned, so a run is
+not reproducible from its inputs the way a job is. That is why these runs carry
+`kind='experiment'`, stay out of the job list and the in-flight count, and have
+their own page and their own held-VM list. The reason they are separated is the
+missing pin, not the isolation.
+
+### Release matrix for derived targets
+
+```text
+24.04 noble   ubuntu-24.04-generic   deb822 sources
+22.04 jammy   ubuntu-22.04-generic   deb822 sources
+18.04 bionic  ubuntu-18.04-generic   one-line sources (apt 1.6 reads no .sources)
+```
+
+The snapshot serial moves along one release's timeline and cannot cross
+releases: noble never shipped PHP 7.2, so no serial of noble can install it.
+A derived target therefore chooses a release as well as a serial, and that
+choice decides what the job installs.
+
+It is a lookup, not a guess. Launchpad publishes, per release, every binary
+version the archive ever carried, so `src/xentry/release.py` asks "did any
+release we can boot ever publish this package at this version?" with one small
+query per release, newest first, before anything is built. The alternative - a
+model that knows install paths - answers the same question for the price of a
+2.5 GB image build, and a wrong answer arrives as a provision failure
+indistinguishable from a bad package name.
+
+The version to match comes from the advisory's `affected_range`: the first
+version-shaped token, then shorter prefixes down to major.minor. Never a bare
+major, because 2.10.0 would otherwise answer an advisory about 2.1.0.
+
+Only releases whose image is built and pinned in the catalog are considered;
+resolving to one that cannot boot would turn a clean refusal into a late boot
+failure. With none built, a derived job is refused at the form. With a release
+resolved, `readiness-generic` asserts the installed package matches the matched
+prefix - the difference between "something is listening" and "the affected
+build is listening", and the one part of a derived job's claim that a human
+would otherwise have to take on trust.
+
+Each release needs its own base cloud image, pinned out of band from
+`cloud-images.ubuntu.com`'s dated `SHA256SUMS`, and its own built generic
+image. Debian is deliberately absent: `snapshot.debian.org` is a different host
+with a different layout, so it is a second proxy upstream rather than a fourth
+row in this table.
+
+### Pinned apt mirror
+
+```text
+apt mirror: 10.<slot>.0.1:8082 (host bridge gateway, broker-managed, off by default)
+upstream:   https://snapshot.ubuntu.com/ubuntu/<serial>/...
+guest sees: http://10.<slot>.0.1:8082/ubuntu/{dists,pool}/...
+```
+
+A setup script for a CVE nobody wired by hand cannot install what it needs: the
+artifact mirror serves a closed allowlist of pinned files, not a package
+archive, and there is no route off the bridge. `broker/aptproxy.py` serves
+Ubuntu packages without creating one.
+
+It is a reverse proxy, not a forward proxy. The guest's `sources.list` points at
+it and it rewrites each path onto one timestamped snapshot of the archive; it
+never reads a destination out of the request, so there is no host field to
+validate, no `CONNECT`, and nothing the guest can aim elsewhere. Paths must
+match `/ubuntu/(dists|pool)/...`, only GET and HEAD are answered, no guest
+header is carried upstream, and the fetch is cached under
+`/var/lib/xentry/apt-cache/<serial>/`.
+
+The serial is the point. `apt-get install apache2` against the live archive
+resolves to whatever is current that day, which would make a provisioned target
+unreproducible - the one property the lab rests on. Against a fixed snapshot the
+same resolution repeats. The serial is a constant in `broker/aptproxy.py`
+(`XENTRY_APT_SNAPSHOT` overrides it for a deliberate one-off), it is inserted on
+the host so the guest cannot pin itself to a different one, and it is reported by
+`create_network` and recorded per job as `provision-inputs.json` evidence -
+because the broker journal keeps only a hash of each result, and "it installed
+apache2" does not say which apache2.
+
+Transport to the guest is plain HTTP on a bridge with no route out, and the
+archive signature is still verified against the keyring shipped in the image,
+which is the part that matters. `targets/common/apt-pin.sh` is the allowlisted
+`apt-pin` step that writes that `sources.list`: a generated setup script is
+still something the broker will not run, but this step is checked in, hashed at
+load, and takes the proxy URL and suite as typed parameters.
+
+Enabled per deployment with `XENTRY_START_APT_PROXY=1`, off otherwise. The rule
+that admits it lives only in the provisioning ruleset, so the freeze drops the
+path along with everything else.
 
 ### Ordered runner steps
 
@@ -445,12 +606,48 @@ GET  /api/jobs/{id}/events?since= polling
 POST /api/jobs/{id}/cancel     + token
 GET  /api/jobs/{id}/bundle
 POST /api/preflight            + token
+POST /api/environments         {job_id} + token; rebuild that job's VMs, left up
+POST /api/environments/{id}/destroy  + token
 GET  /api/system
 ```
 
 Every non-GET route requires the token and a JSON content type. Token delivery: a 32-byte `xentry_token` in an HttpOnly, SameSite=Strict cookie, plus a double-submit CSRF token in a meta tag and the `X-Xentry-CSRF` header. `check_id` is stored in `link_checks` with a 30-minute TTL and single-use rule; the job stores `bundle_sha256` and fails if the refetched bundle differs. `jobs.cve_id` is filled at plan time; the submit row may be null until extraction. The error envelope and status map are in `xentry-v1-contracts.md`.
 
 The UI has four screens and one help modal. It shows the target and attacker (if any), network, nonce path (not value), probe, evidence channel, caps, runner facts, verdict, authority, and agent summary labeled non-authoritative. It never uses "succeeded" or "verified." All model/PoC/transcript text is autoescaped and inert; a strict CSP is on. The banned-word test scans rendered HTML, JSON, static assets, and bundle text.
+
+### Rebuilt environments
+
+A rebuilt environment is the pinned base image plus the recorded setup script
+brought back up for a person to work in: a target and an attacker on their own
+subnet, with the PoC built and left unrun. It is offered per CVE from that
+CVE's most recent completed job, and takes only that job's `target_id` and
+`cve_id`.
+
+A job's first three steps - `fetch`, `extract`, `plan` - exist to *choose*
+which of the checked-in `TargetInstance`s to run: they fetch the CVE page and
+the PoC, ask the extractor for facts, and match the CVE id. Everything that
+then provisions the target (base image, setup script and its hash, resources,
+actor, and the locally pinned PoC artifact) is on that instance. A rebuild
+already knows the choice, so it replaces all three with one `select_target`
+step: no fetch, no extractor call, no link check, and no bundle digest - there
+is no claim about any source for a digest to protect.
+
+Otherwise it runs the same ordered steps as a job and stops after `build_poc`,
+so it plants no nonce, runs no null actor, takes no snapshot, captures no probe
+and produces no verdict. Nothing observed inside one is evidence, and its row
+carries `kind='environment'`, which keeps it out of the job list, out of the
+in-flight count, and out of anything that reports a result. It is listed on the
+Running VMs page beside held VMs, with the two kinds labeled separately for
+exactly this reason.
+
+Environments are deliberately transient. One has no `outcome` while it is up,
+so the restart recovery that marks outcome-less rows interrupted destroys its
+VMs and its subnet on the next start - the same path a crashed job takes. There
+is one runner, so a rebuild queued behind a running or held job waits for it,
+and the page says so rather than appearing stuck. Destroying one that is still
+building does not tear down from the request thread, which would race the
+worker: it sets `cancel_requested`, and the worker's own cleanup destroys what
+it has created and records the outcome.
 
 ### Security and threat model
 
@@ -548,6 +745,73 @@ Each heading names the rejected option; the chosen path is in the Reason for Rej
 * **Pros:** lightweight.
 * **Cons:** shares the host kernel and requires the daemon/socket; contradicts the no-container rule.
 * **Reason for Rejection:** attacker VM provides a separate kernel; no containers.
+
+### 11. Rejected: guest internet access or a caching apt proxy (chosen: pinned snapshot mirror)
+
+* **Pros of the rejected options:** a guest with NAT, or a plain
+  `apt-cacher-ng`, installs anything with no path rewriting and no serial to
+  maintain.
+* **Cons:** NAT gives a detonated exploit a route out, which is the one thing
+  the isolated network exists to prevent. A caching proxy keeps the route
+  closed but not the pin: `apt-get install apache2` resolves to whatever is
+  current that day, so the same job provisions a different machine next month
+  and every verdict becomes unrepeatable. A forward proxy also takes its
+  destination from the request, which is a host field the guest controls.
+* **Reason for Rejection:** a reverse proxy onto one `snapshot.ubuntu.com`
+  serial keeps both properties - the guest reaches only a host service on its
+  own bridge gateway, and the serial is inserted host-side so provisioning is
+  reproducible and auditable. The cost is maintaining the serial, which is a
+  deliberate commit, and that is the right place for that decision.
+
+### 12. Rejected: a generated setup script per CVE (chosen: a derived target with a closed parameter vocabulary)
+
+* **Pros of the rejected option:** a model-authored setup script installs
+  anything, so almost any CVE could be attempted.
+* **Cons:** the broker binds each step id to a checked-in script whose hash it
+  verifies at load, and "the app never supplies a command, path, or user". A
+  generated script breaks that: it would make model output into root commands
+  in a VM, and the audit trail would record a script nobody reviewed.
+* **Reason for Rejection:** the derived path keeps the broker as the only thing
+  that decides what root runs. The model fills in a package list, a unit list
+  and an entrypoint - each checked against a pattern by the app and again by
+  the script - and the pinned apt mirror covers most of what a generated script
+  would have wanted to do. The cost is a narrower set of admissible CVEs, and
+  the budget raise to 9,800 lines that this path required.
+
+### 13. Rejected: a model that knows which base image installs a version (chosen: a lookup against the archive's publication record)
+
+* **Pros of the rejected option:** no curated matrix, no per-release images to
+  build; the model answers for any distro it has read about.
+* **Cons:** it is a guess whose cost to falsify is a 2.5 GB image build and a
+  provision run, and whose failure looks exactly like a mistyped package name.
+  Every candidate base needs a pinned cloud image, a manifest entry, a built
+  image, a broker registry id and a matching suite anyway - so the model would
+  be choosing from a curated list regardless, and the curation is the work.
+* **Reason for Rejection:** Launchpad already publishes, per release, every
+  binary version the archive carried. The question "which release can install
+  this" is data, answered in one query per release before anything is built.
+  The model keeps the job it is already citation-checked on - what version is
+  affected - and the release choice becomes deterministic and replayable. The
+  cost is a small matrix of pinned releases and the budget raise to 10,200
+  lines; the gain is that `readiness` can assert the installed version, which
+  is what makes a derived verdict worth more than "a PoC printed a nonce".
+
+### 14. Rejected: keeping generated PoCs out of the harness entirely (chosen: an experimental pipeline, separated by kind)
+
+* **Pros of the rejected option:** every run in the system stays reproducible
+  from its recorded inputs, and no model output is ever executed.
+* **Cons:** the harness can then only reproduce CVEs that already have a
+  published PoC someone pinned, which is the smaller part of the problem, and
+  the question "could a model write this exploit given the advisory" is one the
+  lab is well shaped to answer safely.
+* **Reason for Rejection:** the execution boundary already assumes the PoC is
+  hostile - it is a stranger's code from GitHub, run unprivileged in a
+  disposable VM with no route out - so generated code needs no new privilege,
+  only a new provenance. The honest cost is the missing pin, and that is
+  handled by separation rather than by a disclaimer: `kind='experiment'`, its
+  own page, its own VM list, out of the job list entirely. The evidence
+  contract is unchanged because the nonce never enters a prompt, including on
+  retry, where the feedback is redacted first.
 
 ## Non-Functional Requirements
 

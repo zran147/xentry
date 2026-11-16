@@ -24,13 +24,6 @@ class LibvirtError(RuntimeError):
         self.returncode = returncode
 
 
-@dataclass(frozen=True)
-class DomainInfo:
-    name: str
-    state: str
-    ip: str | None
-
-
 def _esc(value: str) -> str:
     return saxutils.escape(value, {'"': "&quot;"})
 
@@ -182,24 +175,6 @@ class Virsh:
                 return match.group(1)
         return None
 
-    def domain_ip(self, name: str) -> str | None:
-        try:
-            output = self.run(["domifaddr", name, "--source", "lease"])
-        except LibvirtError:
-            return None
-        for line in output.splitlines():
-            parts = line.split()
-            if len(parts) >= 4 and "/" in parts[3]:
-                return parts[3].split("/")[0]
-        return None
-
-    def domain_info(self, name: str) -> DomainInfo:
-        return DomainInfo(
-            name=name,
-            state=self.domain_state(name),
-            ip=self.domain_ip(name),
-        )
-
     def list_domains(self) -> list[str]:
         return [line.strip() for line in self.run(["list", "--name"]).splitlines() if line.strip()]
 
@@ -221,9 +196,6 @@ class Virsh:
     def snapshot_revert(self, domain: str, name: str) -> None:
         self.run(["snapshot-revert", domain, name])
 
-    def snapshot_delete(self, domain: str, name: str) -> None:
-        self.run(["snapshot-delete", domain, name])
-
 
 def network_xml(
     *,
@@ -233,7 +205,10 @@ def network_xml(
     target_ip: str,
     attacker_mac: str | None = None,
     attacker_ip: str | None = None,
+    gateway: str = "10.42.0.1",
 ) -> str:
+    # One /24 per job, so the range follows whichever gateway it was given.
+    prefix = gateway.rsplit(".", 1)[0]
     hosts = f'      <host mac="{_esc(target_mac)}" ip="{_esc(target_ip)}"/>\n'
     if attacker_mac and attacker_ip:
         hosts += f'      <host mac="{_esc(attacker_mac)}" ip="{_esc(attacker_ip)}"/>\n'
@@ -242,9 +217,9 @@ def network_xml(
         f"  <name>{_esc(name)}</name>\n"
         "  <forward mode='none'/>\n"
         f"  <bridge name='{_esc(bridge)}' stp='on' delay='0'/>\n"
-        "  <ip address='10.42.0.1' netmask='255.255.255.0'>\n"
+        f"  <ip address='{_esc(gateway)}' netmask='255.255.255.0'>\n"
         "    <dhcp>\n"
-        "      <range start='10.42.0.100' end='10.42.0.200'/>\n"
+        f"      <range start='{_esc(prefix)}.100' end='{_esc(prefix)}.200'/>\n"
         f"{hosts}"
         "    </dhcp>\n"
         "  </ip>\n"

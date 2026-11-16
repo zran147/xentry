@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import os
 import re
 import tempfile
 from datetime import UTC, datetime
@@ -57,12 +58,22 @@ def load_catalog(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+# The unprivileged app reads this catalog at import time, so a catalog it cannot
+# open is not a degraded page - uvicorn fails to load the module at all. A
+# replace() carries the temp file's mode onto the target and mkstemp makes that
+# 0600, which locked the app out of its own pins once already. The catalog holds
+# ids, URLs and digests and never a secret, so the mode is set explicitly here
+# rather than inherited from the temp file.
+CATALOG_MODE = 0o644
+
+
 def write_catalog(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix="artifacts.", suffix=".yaml", dir=path.parent)
     try:
         with open(fd, "w", encoding="utf-8") as handle:
             yaml.safe_dump(data, handle, sort_keys=False)
+        os.chmod(tmp_name, CATALOG_MODE)
         Path(tmp_name).replace(path)
     finally:
         Path(tmp_name).unlink(missing_ok=True)

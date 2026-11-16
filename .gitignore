@@ -10,6 +10,11 @@ var/
 *.iso
 *.key
 *.pem
+# Backups the install and repair scripts leave beside the file they changed.
+# config/artifacts.yaml.bak was staged for commit once, which would have put a
+# stale pin catalog in the history next to the real one.
+*.bak
+*.bak.*
 
 __pycache__/
 *.py[cod]

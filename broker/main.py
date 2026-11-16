@@ -46,12 +46,16 @@ VERB_PARAMS: dict[str, frozenset[str]] = {
     "resolve_artifact": frozenset({"artifact_id"}),
     "resolve_step": frozenset({"step_id"}),
     "list_managed": frozenset(),
-    "create_network": frozenset({"job_id", "profile_id"}),
+    "create_network": frozenset(
+        {"job_id", "profile_id", "apt_snapshot", "apt_archive", "registry_cutoff"}
+    ),
+    "lock_network": frozenset({"job_id", "target_ports"}),
     "create_target": frozenset({"job_id", "target_id", "image_id"}),
     "create_attacker": frozenset({"job_id", "profile_id", "image_id"}),
-    "exec": frozenset({"vm_id", "step_id", "params", "tty", "timeout_s"}),
+    "exec": frozenset({"vm_id", "step_id", "params", "tty", "timeout_s", "trace"}),
     "cancel_exec": frozenset({"vm_id", "request_id"}),
     "copy_in": frozenset({"vm_id", "artifact_id", "guest_path"}),
+    "stage_artifact": frozenset({"job_id", "artifact_id", "path", "sha256"}),
     "copy_out": frozenset({"vm_id", "guest_path"}),
     "place_nonce": frozenset({"vm_id", "nonce_id", "path", "owner", "mode", "value"}),
     "snapshot": frozenset({"vm_id", "kind"}),
@@ -176,6 +180,9 @@ def _exec(params: dict[str, Any]) -> dict[str, Any]:
     tty = params.get("tty", False)
     if not isinstance(tty, bool):
         raise BrokerError("broker_registry_rejected", "invalid tty")
+    trace = params.get("trace", False)
+    if not isinstance(trace, bool):
+        raise BrokerError("broker_registry_rejected", "invalid trace")
     timeout_s = _integer(params, "timeout_s", 1, 1800)
     return {
         "status": "not_implemented",
@@ -183,6 +190,7 @@ def _exec(params: dict[str, Any]) -> dict[str, Any]:
         **step,
         "tty": tty,
         "timeout_s": timeout_s,
+        "trace": trace,
     }
 
 
@@ -194,6 +202,11 @@ def _copy_in(params: dict[str, Any]) -> dict[str, Any]:
         "artifact_id": resolve_artifact(_text(params, "artifact_id")),
         "guest_path": _guest_path(params),
     }
+
+
+def _stage_artifact(params: dict[str, Any]) -> dict[str, Any]:
+    _require(params, "job_id", "artifact_id", "path", "sha256")
+    return {"status": "not_implemented", "artifact_id": _text(params, "artifact_id")}
 
 
 def _copy_out(params: dict[str, Any]) -> dict[str, Any]:
@@ -319,6 +332,11 @@ def _destroy_vm(params: dict[str, Any]) -> dict[str, Any]:
     return {"destroyed": True, "vm_id": _text(params, "vm_id")}
 
 
+def _lock_network(params: dict[str, Any]) -> dict[str, Any]:
+    _require(params, "job_id")
+    return {"locked": True, "job_id": _text(params, "job_id"), "target_ports": []}
+
+
 def _destroy_network(params: dict[str, Any]) -> dict[str, Any]:
     _require(params, "network_id")
     return {"destroyed": True, "network_id": _text(params, "network_id")}
@@ -333,11 +351,13 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "resolve_step": _step,
     "list_managed": _list_managed,
     "create_network": _create_network,
+    "lock_network": _lock_network,
     "create_target": _create_target,
     "create_attacker": _create_attacker,
     "exec": _exec,
     "cancel_exec": _cancel_exec,
     "copy_in": _copy_in,
+    "stage_artifact": _stage_artifact,
     "copy_out": _copy_out,
     "place_nonce": _place_nonce,
     "snapshot": _snapshot,
@@ -355,12 +375,15 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 
 RUNTIME_VERBS = frozenset(
     {
+        "ping",
         "create_network",
+        "lock_network",
         "create_target",
         "create_attacker",
         "exec",
         "place_nonce",
         "copy_in",
+        "stage_artifact",
         "copy_out",
         "http_probe",
         "proxy_capture",
@@ -580,6 +603,18 @@ def main() -> int:
             )
         ),
         start_mirror=os.environ.get("XENTRY_START_MIRROR", "1") != "0",
+        # Off by default: it is reachable from a guest during provisioning, so
+        # it is opted into per deployment rather than assumed.
+        start_apt_proxy=os.environ.get("XENTRY_START_APT_PROXY", "0") != "0",
+        # Same reasoning, and the same default: reachable from a guest while it
+        # provisions, so a deployment opts in.
+        start_registry_proxy=os.environ.get("XENTRY_START_REGISTRY_PROXY", "0") != "0",
+        # This line did not exist. BrokerRuntime took start_oci_mirror and
+        # nothing ever passed it, so XENTRY_START_OCI_MIRROR was read nowhere
+        # in the tree - while every Dockerfile job failed telling the operator
+        # to set it, and setting it changed nothing no matter how often the
+        # broker was restarted.
+        start_oci_mirror=os.environ.get("XENTRY_START_OCI_MIRROR", "0") != "0",
     )
     server = BrokerServer(socket_path, data_dir / "jobs", _allowed_uids(), runtime=runtime)
     server.start()

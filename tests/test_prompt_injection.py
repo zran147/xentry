@@ -85,12 +85,32 @@ def test_extractor_requires_verbatim_citations() -> None:
     # The quote exists but the CVE does not; citations alone cannot authorize it.
     verify_facts(facts, [artifact])
     assert by_cve(facts.cve_id) is None
+
+    # The two guards that are real, and both still hold. A digest EQUALITY
+    # check used to stand here as a third - it was removed, because it tested
+    # the model's ability to copy 64 hex characters rather than any property of
+    # the evidence: the harness supplies the artifacts and knows their digests,
+    # and a model cannot change which artifact it was given. What it did cost
+    # was every extraction where one character came back wrong, because
+    # version_evidence is verified fatally.
+    unseen = EvidenceRef(
+        artifact_id="a", quote="this sentence was never in the artifact at all"
+    )
     with pytest.raises(ExtractorError) as exc:
-        verify_facts(
-            facts,
-            [ArtifactText("a", "0" * 64, text)],
-        )
+        verify_facts(facts.model_copy(update={"citations": [unseen]}), [artifact])
     assert exc.value.code == "evidence_insufficient"
+
+    elsewhere = EvidenceRef(artifact_id="not-supplied", quote=HOSTILE)
+    with pytest.raises(ExtractorError) as exc:
+        verify_facts(facts.model_copy(update={"version_evidence": [elsewhere]}), [artifact])
+    assert "unknown artifact" in str(exc.value)
+
+    # And the digest recorded is the harness's whatever the model typed, so the
+    # record cannot be made to describe content nobody supplied.
+    lying = EvidenceRef(artifact_id="a", sha256="0" * 64, quote=HOSTILE)
+    recorded = facts.model_copy(update={"version_evidence": [lying], "citations": [lying]})
+    verify_facts(recorded, [artifact])
+    assert recorded.version_evidence[0].sha256 == artifact.sha256
 
 
 def test_extractor_prompt_has_no_instruction_to_execute() -> None:

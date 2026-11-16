@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field
 
 class EvidenceRef(BaseModel):
     artifact_id: str
-    sha256: str
+    # Optional, and filled in by verify_facts from the artifact the id names.
+    # Requiring the model to echo 64 hex characters added a failure mode and no
+    # guarantee: the harness supplied the artifact and already knows its
+    # digest. One wrong character used to discard a whole extraction.
+    sha256: str = ""
     quote: str
     line_start: int | None = None
     line_end: int | None = None
@@ -30,8 +34,88 @@ class Facts(BaseModel):
     build_strategy: str
     poc_context: Literal["remote", "local"]
     marker_candidate: str | None = None
+    # Provisioning instructions, not claims about the vulnerability: what the
+    # PoC's own README says to install and run. They carry no citation
+    # requirement because they assert nothing a reader could be misled by - a
+    # wrong package or entrypoint fails the provision loudly, and the closed
+    # vocabulary means neither can become an arbitrary command. Used only by a
+    # derived target; the three checked-in ones ignore them.
+    setup_packages: list[str] = Field(default_factory=list)
+    setup_units: list[str] = Field(default_factory=list)
+    # What the PoC needs on the ATTACKER to run at all - a JDK for a JNDI
+    # exploit, a compiler for a kernel PoC. Installed from the attacker's own
+    # archive before the network locks, because after that it has no network
+    # and a missing dependency is a failed run with a misleading reason.
+    attacker_packages: list[str] = Field(default_factory=list)
+    attacker_pip: list[str] = Field(default_factory=list)
+    poc_argv: list[str] = Field(default_factory=list)
+    # Where in the PoC repository the vulnerable application is built from. Read
+    # as evidence about the environment, never executed: an ecosystem target
+    # takes the dependency pins and the start command out of the manifest in
+    # this directory and installs them itself. "" is the repository root.
+    app_dir: str | None = None
+    # Every version the advisory names as fixing the flaw. A list, because a
+    # maintained library fixes each supported branch separately: CVE-2026-126187
+    # names 19.0.9, 19.1.10, 19.2.9 and 19.3.1, and which one a job wants
+    # depends on the branch its lab is on. Asking for "the fixed version" got
+    # 19.0.9 - a two-minor downgrade from the lab's 19.3.0, which would have
+    # made the control build a different stack rather than the same one one
+    # version on. Uncited: it only decides whether a control run is possible,
+    # and that run either fails - proving the point - or fails the job.
+    fixed_versions: list[str] = Field(default_factory=list)
+    poc_entrypoint: str | None = None
+    # How a LOCAL PoC hands over root, which the harness must never guess: the
+    # relay that carries the proof out has to be given to the exploit the way
+    # that exploit accepts it. One checked-in script per shape, so this chooses
+    # a step id and nothing else. null means neither shape fits, and the job is
+    # refused saying so rather than running a relay the PoC will ignore.
+    privesc_shape: (
+        Literal[
+            "stdin-shell", "argv-command", "fixed-command", "pty-shell",
+            "setuid-drop", "two-stage",
+        ]
+        | None
+    ) = None
+    # A PoC that is a command rather than a file - blasty's CVE-2021-41773 is a
+    # curl line in its README. An EvidenceRef, so the quote is verified against
+    # the artifact exactly like version_evidence: the model points at a
+    # command, it cannot write one. The two spans say which part of that quote
+    # is the host:port and which is the file being read, and the harness
+    # substitutes its own at those spans and nowhere else.
+    poc_command: EvidenceRef | None = None
+    poc_command_target: str | None = None
+    poc_command_read: str | None = None
+    # The span naming the command the TARGET executes, for an advisory whose
+    # claim is code execution. Exactly one of read or exec: which one is the
+    # claim the run proves, and a disclosure does not prove execution.
+    poc_command_exec: str | None = None
+    # The name of the script that starts an unpacked product - Confluence's
+    # start-confluence.sh - for the last-resort download path, where there is no
+    # package and so no systemd unit. A name, not a path and not a command: the
+    # checked-in setup step resolves it under the unpacked tree and decides how
+    # it runs. Uncited for the same reason setup_units is: a wrong name fails
+    # the provision with the directory listing in the step output.
+    launch: str | None = None
+    # When the affected software is only vulnerable once a file is in place -
+    # Apache needs `Require all granted`, a Tomcat app needs its .war in
+    # webapps - the KIND of placement, from a closed set the setup step owns.
+    # Not a path: the kind decides the path, in checked-in code.
+    place: str | None = None
+    # Which file in the PoC repository IS that placement, as a path relative to
+    # its root - blasty's is "000-default.conf". The file listing makes it
+    # visible, and naming it lets the approval card offer it instead of asking
+    # the operator to go and find it.
+    place_file: str | None = None
+    # The directory in the PoC repository holding a Dockerfile that builds the
+    # vulnerable environment, relative to its root; "" for the root itself.
+    # Set only when that is the ONLY description the author gave - it trades
+    # our pinned provenance for theirs, which ADR 34 records.
+    dockerfile: str | None = None
     artifact_candidates: list[EvidenceRef] = Field(default_factory=list)
     citations: list[EvidenceRef]
+    # Filled in by verify_facts, not by the model: why a narrative citation was
+    # dropped. Defaulted so an extractor reply never has to supply it.
+    dropped_citations: list[str] = Field(default_factory=list)
 
 
 class Resources(BaseModel):
@@ -72,7 +156,9 @@ class NullActor(BaseModel):
 
 
 class EvidenceChannel(BaseModel):
-    kind: Literal["target_probe", "proxy_capture", "host_serial", "qmp"]
+    kind: Literal[
+        "target_probe", "proxy_capture", "host_serial", "qmp", "attacker_transcript"
+    ]
     channel: str
 
 

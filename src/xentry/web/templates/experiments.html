@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{%- macro login(label, key_path, user, host) %}
+<div class="copyable">
+  <div class="row tight">
+    <span class="muted">{{ label }}</span>
+    <button class="copy" type="button">Copy</button>
+  </div>
+  <pre class="plan">sudo ssh -i {{ key_path }} \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  {{ user }}@{{ host }}</pre>
+</div>
+{%- endmacro %}
+{% block content %}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+
+<section class="panel">
+  <h2>Experimental <span class="pill" data-status="pending">no pinned PoC</span></h2>
+  {% if model %}
+  <form id="experiment-form">
+    <label for="experiment-cve">CVE link</label>
+    <input id="experiment-cve" name="cve_url" type="url" required
+           placeholder="https://nvd.nist.gov/vuln/detail/CVE-..." />
+    <div class="row">
+      <span class="muted">
+        Model <span class="mono">{{ model }}</span>, up to
+        <span class="mono">{{ attempts }}</span> attempt(s)
+      </span>
+      <button id="experiment-button" type="submit">
+        <span class="spinner" hidden></span>Write a PoC and run it
+      </button>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">
+    No model is configured. Set <span class="mono">XENTRY_POC_MODEL</span> (and
+    <span class="mono">XENTRY_POC_API_BASE</span> for a local llama.cpp server)
+    in the app environment.
+  </p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="row">
+    <h2>Held VMs <span class="count">{{ held | length }}</span></h2>
+    {% if held %}
+    <button class="collapse-all" type="button" data-section="xheld">Collapse all</button>
+    {% endif %}
+  </div>
+  {% for item in held %}
+  <div class="held"
+       data-section="xheld"
+       data-held-job="{{ item.job.id }}"
+       data-held-at="{{ item.held.held_at or '' }}"
+       data-hold-s="{{ item.held.hold_s or 0 }}">
+    <div class="row">
+      <h3>
+        <button class="cardtoggle mono" type="button" aria-expanded="true">
+          <span class="caret" aria-hidden="true"></span>{{ item.job.id[:12] }}
+        </button>
+        <span class="mono muted">{{ item.job.cve_id or "-" }}</span>
+        <span class="pill" data-status="pending">verdict pending</span>
+      </h3>
+      <span>
+        {%- if (item.held.hold_s or 0) > 0 %}
+        <span class="muted">Destroyed in </span><span class="ttl elapsed">-</span>
+        {%- endif %}
+        <button class="release" type="button" data-job="{{ item.job.id }}">
+          <span class="spinner" hidden></span>Release and destroy
+        </button>
+      </span>
+    </div>
+    <div class="cardbody">
+      <dl class="facts">
+        <dt>Run</dt><dd><a class="mono" href="/jobs/{{ item.job.id }}">{{ item.job.id }}</a></dd>
+        <dt>Target VM</dt><dd class="mono">{{ item.held.target_vm or "-" }}</dd>
+        <dt>Target IP</dt><dd class="mono">{{ item.held.target_ip or "-" }}</dd>
+        <dt>Attacker VM</dt><dd class="mono">{{ item.held.attacker_vm or "-" }}</dd>
+        <dt>Attacker IP</dt><dd class="mono">{{ item.held.attacker_ip or "-" }}</dd>
+        <dt>Network</dt><dd class="mono">{{ item.held.network_id or "-" }}</dd>
+      </dl>
+      {% if item.held.keys_dir and item.held.target_ip %}
+      {{ login("root on the target", item.held.keys_dir ~ "/root", "root", item.held.target_ip) }}
+      {{ login("actor on the target", item.held.keys_dir ~ "/actor", "xentry-guest", item.held.target_ip) }}
+      {%- if item.held.attacker_ip %}
+      {{ login("actor on the attacker - where the generated PoC is", item.held.keys_dir ~ "/actor", "xentry-guest", item.held.attacker_ip) }}
+      {%- endif %}
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <h2>Experimental runs <span class="count">{{ runs | length }}</span></h2>
+  {% if runs %}
+  <table>
+    <thead>
+      <tr><th>Run</th><th>CVE</th><th>Target</th><th>State</th><th>Verdict</th><th>Authority</th></tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a class="mono" href="/jobs/{{ run.id }}">{{ run.id[:12] }}</a></td>
+        <td class="mono">{{ run.cve_id or "-" }}</td>
+        <td>{{ run.target_id }}</td>
+        <td><span class="pill" data-status="{{ run.outcome or 'running' }}">{{ run.outcome or "running" }}</span></td>
+        <td><span class="pill" data-status="{{ run.verdict or 'pending' }}">{{ run.verdict or "pending" }}</span></td>
+        <td class="mono">{{ run.authority or "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nothing has been run here yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
