@@ -1,0 +1,36 @@
+[Unit]
+Description=xentry: permanent host rules for the mirror VM's bridge
+Documentation=file:///opt/xentry/docs/adr/0002-mirrors-in-their-own-vm.md
+# After libvirt, because the bridge must exist for iifname rules to match a
+# live interface. nftables accepts rules naming an absent interface, but
+# loading after the bridge exists keeps the failure mode simple.
+After=libvirtd.service network-pre.target
+Wants=libvirtd.service
+Before=xentry-broker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/xentry/host-wan.nft
+# THE ROUTES, here because they must outlive a reboot and because they are
+# meaningless without the rules above.
+#
+# The broker provisions every guest over ssh - that is the control channel for
+# provisioning, readiness, staging the PoC and collecting evidence. Stage 2
+# took this host's address off the guests' bridges, which stopped the guests
+# reaching the host AND stopped the host reaching the guests. The second was
+# not intended: `ip route get 10.43.1.10` resolved via the LAN gateway and
+# every connection died there.
+#
+# These send guest traffic through the mirror VM, which already forwards. The
+# isolation is unaffected: this is host-to-guest. A guest's own packets to
+# this host are still dropped three times over - by the VM's phase rules, by
+# the VM's egress filter, and by the input chain above.
+ExecStartPost=/sbin/ip route replace 10.43.1.0/24 via 10.44.0.2
+ExecStartPost=/sbin/ip route replace 10.43.2.0/24 via 10.44.0.2
+# Deliberately NOT ExecStop=nft delete table: a stop that removed these rules
+# would leave the mirror VM able to reach this host, which is the state this
+# unit exists to prevent.
+
+[Install]
+WantedBy=multi-user.target

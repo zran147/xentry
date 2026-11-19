@@ -21,7 +21,12 @@ from tests.test_runner import (
     fake_fetch,
     fake_validate,
 )
-from xentry.db import connect, init_db
+from xentry.db import MIGRATIONS, connect, init_db
+
+# The newest migration on disk. Hard-coding this number meant every
+# migration broke six unrelated tests, which teaches editing the
+# assertion instead of reading it.
+LATEST_MIGRATION = max(int(p.name.split("_", 1)[0]) for p in MIGRATIONS.glob("*.sql"))
 from xentry.jobstore import (
     count_live_jobs,
     create_job,
@@ -126,7 +131,7 @@ def test_the_kind_column_arrives_with_migration_005(tmp_path: Path) -> None:
 
     upgraded = init_db(db_path, migrations_dir=migrations)
     try:
-        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == LATEST_MIGRATION
         row = upgraded.execute("SELECT kind FROM jobs WHERE id='old-job'").fetchone()
         assert row["kind"] == "job"
         assert [item["id"] for item in list_jobs(upgraded)] == ["old-job"]

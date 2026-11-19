@@ -29,7 +29,7 @@ from typing import Any
 import asyncssh
 import yaml
 
-from broker.aptproxy import AptProxyError, AptSnapshotProxy
+from broker.aptproxy import AptProxyError, AptSnapshotProxy, check_archive
 from broker.errors import BrokerError
 from broker.exec_ops import SSHError, SSHTransport
 from broker.libvirt_ops import LibvirtError, Virsh, domain_xml, network_xml
@@ -57,6 +57,41 @@ JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 VM_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 NONCE_RE = re.compile(r"^[0-9a-f]{32,128}$")
 OWNER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+# ADR 0002 stage 2: two persistent island bridges, defined by
+# scripts/proxy-vm-up.sh, neither with an address on this host.
+# THE ONLY PATH. This was a default of "" while the mirrors still ran on
+# the host, so the old path was what actually ran unless an environment
+# variable said otherwise - and a job submitted to "test the new path" ran
+# the old one and proved nothing.
+#
+# With a real address here, every branch keyed on self.proxy_ip takes the
+# mirror-VM side: the in-process mirrors never start, the guests go on the
+# island bridges, and the phases are pushed to the VM. If the VM is not
+# reachable, configure_mirror_vm raises mirror_vm_unconfigured and the job
+# fails saying so, which is the correct outcome - there is nothing to fall
+# back TO any more.
+# A free command is bounded in time and in how much of its output is carried
+# back: a model that runs `yes` or `journalctl -f` must not be able to hang the
+# loop or fill the session transcript. The digests are of the FULL output, so a
+# truncated field is still attributable.
+FREE_EXEC_MAX_S = 600
+# The reserved step id and the file it always means. Not in steps.yaml, so it
+# can never be resolved as a manifest step.
+GENERATED_STEP = "provision-generated"
+# WHERE copy_out ALREADY PUT IT. The model writes the script in the VM and
+# copies it out under this exact name; copy_out lands it as root under the
+# job's out/ and chmods it 0640 for the app to read. So staging is the copy,
+# there is no cross-privilege write, and the path stays derived rather than
+# passed - which is what makes job A's script unable to reach job B's VM.
+GENERATED_SCRIPT = "out/provision.sh"
+GENERATED_MAX_S = 1800
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+FREE_EXEC_MAX_LOG = 65536
+
+PROXY_VM_IP = "10.44.0.2"
+PROXY_VM_BRIDGE = "xentrywan0"
+TARGET_NET = "xentry-target"
+ATTACKER_NET = "xentry-attacker"
 TARGET_MAC = "52:54:00:00:00:10"
 ATTACKER_MAC = "52:54:00:00:00:20"
 JOB_SUBNET_PREFIX = "10.42"
@@ -92,6 +127,38 @@ class JobNet:
             attacker_ip=f"{prefix}.20",
             table=f"{TABLE}_{octet}",
             mirror_url=f"http://{prefix}.1:{mirror_port}",
+        )
+
+    @classmethod
+    def for_mirror_vm(cls, mirror_port: int, proxy_ip: str) -> JobNet:
+        # Stage 2. Two bridges rather than one, so the mirror VM ROUTES between
+        # the guests and can police them - on one bridge they would talk at
+        # layer 2 and nothing could filter them, here or on the host.
+        #
+        # octet 0 means "not taken from the pool": these subnets are fixed, and
+        # gate G8's one-job-at-a-time is what makes that safe.
+        #
+        # gateway is the target's side, because that is what the readiness and
+        # step paths mean by it. The attacker's gateway is 10.42.2.1 and is
+        # handed out by the VM's dnsmasq, not by anything here.
+        #
+        # Every mirror is addressed at the VM itself, reached by routing
+        # THROUGH it: there is no host gateway to borrow an address from any
+        # more. Guest-visible ports do not change.
+        return cls(
+            octet=0,
+            bridge="xentrytgt0",
+            # 10.43, NOT 10.42: the octet pool allocates
+            # 10.42.1.0/24 and 10.42.2.0/24, so the islands would have
+            # collided with a per-job subnet - the apache job ran on
+            # 10.42.1.0/24 with a host gateway at 10.42.1.1, which is an
+            # address this VM also holds. Two owners of one address is a
+            # routing coin-flip.
+            gateway="10.43.1.1",
+            target_ip="10.43.1.10",
+            attacker_ip="10.43.2.20",
+            table=f"{TABLE}_mirrorvm",
+            mirror_url=f"http://{proxy_ip}:{mirror_port}",
         )
 
     @property
@@ -238,6 +305,13 @@ class BrokerRuntime:
         # Empty means "this job's gateway"; an explicit value overrides it,
         # which is how a dev host binds the mirror somewhere reachable.
         mirror_bind: str = "",
+        # Set together, by XENTRY_WAN_BRIDGE and XENTRY_PROXY_IP, and empty
+        # until the mirror VM exists. Empty keeps every rule exactly as it was
+        # (ADR 0002 stage 1 ships before the VM), so this is the one switch
+        # that moves the mirrors off the host.
+        wan_bridge: str = PROXY_VM_BRIDGE,
+        proxy_ip: str = PROXY_VM_IP,
+        proxy_key: str = "/etc/xentry/proxy-vm.key",
         mirror_port: int = 8081,
         # The pinned apt mirror. Off unless asked for: the three checked-in
         # targets install from baked images and need no package archive.
@@ -277,6 +351,9 @@ class BrokerRuntime:
         self.manifest_path = Path(manifest_path) if manifest_path else None
         self.start_mirror = start_mirror
         self.mirror_bind = mirror_bind
+        self.wan_bridge = wan_bridge
+        self.proxy_ip = proxy_ip
+        self.proxy_key = proxy_key
         self.mirror_port = mirror_port
         # One mirror per job, bound to that job's gateway: with forward=none a
         # guest on 10.42.7.0/24 cannot reach a mirror on 10.42.0.1.
@@ -419,7 +496,7 @@ class BrokerRuntime:
             # WHICH catalog. This said only "image artifact is unresolved:
             # debian-11-generic-image" and was diagnosed twice as a stale
             # cache, which it was not: the broker's WorkingDirectory is
-            # /opt/xentry-broker and this path defaults to a RELATIVE
+            # /opt/xentry and this path defaults to a RELATIVE
             # config/artifacts.yaml, so it read that tree's own copy - two
             # days old, ten entries, and no such image - while the app read
             # /opt/xentry/config/artifacts.yaml where the pin was.
@@ -531,6 +608,19 @@ class BrokerRuntime:
         failure_code: str,
         timeout_s: int = 180,
     ) -> str:
+        # libvirt keeps NO lease table for an island network: with no <ip>
+        # element it runs no dnsmasq there, so this lookup can never answer
+        # and every stage-2 job failed with
+        #     no DHCP lease for 52:54:00:00:00:10 on xentry-target
+        # even with the mirror VM serving leases perfectly.
+        #
+        # The address does not need discovering there. dnsmasq in the VM pins
+        # it by MAC from these same constants, so it is already known, and
+        # what follows waits for ssh on it - the real readiness signal either
+        # way.
+        if self.proxy_ip:
+            island = JobNet.for_mirror_vm(self.mirror_port, self.proxy_ip)
+            return island.target_ip if mac == TARGET_MAC else island.attacker_ip
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             ip = self.virsh.network_lease_ip(network, mac)
@@ -550,7 +640,11 @@ class BrokerRuntime:
         failure_code: str,
     ) -> dict[str, Any]:
         job_dir = self._job_dir(job_id)
+        # Stage 2 puts the two guests on separate persistent bridges; before
+        # the cutover they share one network named after the job.
         network_name = f"xentry-{job_id}"
+        if self.proxy_ip:
+            network_name = TARGET_NET if role == "target" else ATTACKER_NET
         if not self.virsh.network_exists(network_name) or not self.virsh.network_active(network_name):
             raise BrokerError("preflight_refused", f"network is not active: {network_name}")
         image = self._image_path(image_id)
@@ -689,6 +783,113 @@ class BrokerRuntime:
             stopped[f"{label}_stopped"] = service is not None
         return stopped
 
+    # One command on the mirror VM, over ssh. Not a listening service: a port
+    # on that VM accepting configuration would be a port the guests can reach,
+    # and the one thing a guest must never change is which snapshot date it is
+    # served or which phase it is in.
+    def _proxy_run(
+        self, command: str, stdin: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["ssh", "-i", self.proxy_key, "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
+             "-o", "LogLevel=ERROR", f"root@{self.proxy_ip}", command],
+            input=stdin, capture_output=True, text=True, timeout=120, check=False,
+        )
+
+    # ADR 0002 stage 2: the phase rules live in the mirror VM, because the host
+    # has no address on the job bridges any more and cannot police them.
+    #
+    # "provisioning" lets both guests fetch from the mirrors and lets neither
+    # reach the other. "locked" forbids fetching and opens exactly the
+    # target's declared ports to the attacker. A failure here is fatal: a job
+    # that proceeded with the previous phase still loaded would be judged on
+    # evidence gathered under the wrong rules.
+    def set_phase(
+        self,
+        phase: str,
+        *,
+        target_ip: str = "",
+        attacker_ip: str = "",
+        target_ports: tuple[int, ...] = (),
+        mirror_ports: tuple[int, ...] = (),
+    ) -> None:
+        if not self.proxy_ip:
+            return
+        payload = json.dumps(
+            {"phase": phase, "target_ip": target_ip, "attacker_ip": attacker_ip,
+             "target_ports": list(target_ports), "mirror_ports": list(mirror_ports)},
+            sort_keys=True,
+        )
+        wrote = self._proxy_run(
+            "install -D -m 0644 /dev/stdin /etc/xentry-mirror/phase.json", payload
+        )
+        if wrote.returncode != 0:
+            raise BrokerError(
+                "mirror_vm_unconfigured",
+                f"could not write phase.json: {(wrote.stderr or '').strip()[:300]}",
+            )
+        loaded = self._proxy_run("/opt/xentry-mirror/phase.sh")
+        if loaded.returncode != 0:
+            raise BrokerError(
+                "mirror_vm_unconfigured",
+                f"the {phase} rules did not load on {self.proxy_ip}: "
+                f"{(loaded.stdout + loaded.stderr).strip()[-800:]}",
+            )
+
+    def configure_mirror_vm(
+        self, job_id: str, *, serial: str, archive: str, ports: dict[str, Any]
+    ) -> None:
+        """Point the mirror VM at this job's pinned archive (ADR 0002).
+
+        Returns immediately when no mirror VM is configured, which is what
+        keeps the pre-cutover path working: with XENTRY_PROXY_IP unset the
+        mirrors are still host processes and nothing here runs.
+
+        Written over ssh rather than through a listening service on purpose.
+        A port on the mirror VM that accepts configuration would be a port the
+        guests can also reach, and the one thing a guest must never be able to
+        change is which snapshot date it is being served.
+
+        A failure here is fatal to the job. The alternative - carrying on with
+        whatever serial the VM was left holding from the previous job - would
+        reproduce a CVE against the wrong archive and report it as a success.
+        """
+        if not self.proxy_ip:
+            return
+        payload = json.dumps(
+            {"job_id": job_id, "serial": serial, "archive": archive, **ports},
+            indent=2,
+            sort_keys=True,
+        )
+        wrote = self._proxy_run(
+            "install -D -m 0644 /dev/stdin /etc/xentry-mirror/job.json", payload
+        )
+        if wrote.returncode != 0:
+            raise BrokerError(
+                "mirror_vm_unconfigured",
+                f"could not write job.json on {self.proxy_ip}: "
+                f"{(wrote.stderr or wrote.stdout).strip()[:400]}",
+            )
+        started = self._proxy_run(
+            "systemctl restart xentry-mirror.service && "
+            "systemctl is-active xentry-mirror.service"
+        )
+        if started.returncode != 0 or started.stdout.strip() != "active":
+            # The journal says which mirror refused and why - serve.py refuses
+            # outright when the serial is missing - and that is the whole
+            # diagnosis, so it is carried into the failure rather than left on
+            # a VM nobody will ssh into.
+            why = self._proxy_run(
+                "systemctl is-active xentry-mirror.service; "
+                "journalctl -u xentry-mirror.service -n 25 --no-pager"
+            )
+            raise BrokerError(
+                "mirror_vm_unconfigured",
+                f"the mirrors on {self.proxy_ip} did not come up for serial "
+                f"{serial} of {archive}: {(why.stdout + why.stderr).strip()[-1200:]}",
+            )
+
     def _cleanup_network(self, network_name: str, table: str = TABLE) -> None:
         # Drop the subnet claim, or a creation that failed holds its octet for
         # the life of the host.
@@ -700,6 +901,12 @@ class BrokerRuntime:
                 self.nft.clear(table)
             except NftablesError:
                 pass
+        if self.proxy_ip:
+            # The stage-2 bridges are persistent and shared by every job. The
+            # guests on them are destroyed by the caller; the networks are not
+            # ours to remove, and undefining them would break the next job and
+            # strand the mirror VM's own NICs.
+            return
         try:
             if self.virsh.network_active(network_name):
                 self.virsh.network_destroy(network_name)
@@ -727,11 +934,36 @@ class BrokerRuntime:
         # A job keeps the octet it was given; a new one takes the lowest free.
         recorded = self._net(job_id)
         net = (
-            recorded
+            JobNet.for_mirror_vm(self.mirror_port, self.proxy_ip)
+            if self.proxy_ip
+            else recorded
             if recorded.octet
             else JobNet.for_octet(self._allocate_octet(job_id), self.mirror_port)
         )
-        if self.virsh.network_exists(network_name):
+        if self.proxy_ip:
+            # Stage 2 owns no per-job network. The two island bridges are
+            # persistent, defined by scripts/proxy-vm-up.sh, and the mirror VM
+            # has a NIC on each - so there is nothing here to define and
+            # nothing to start.
+            #
+            # This block was left in place when the rest of the cutover
+            # landed, so a job still tried to net-define a network whose
+            # bridge xentry-target already owns, and died at step 4 with
+            #     ('net-define', '.../network.xml')
+            # Their absence is checked instead: a missing bridge must fail
+            # here, loudly, rather than at provisioning as a fetch timeout.
+            # No explicit exists() check: starting a network that is not
+            # defined raises LibvirtError with "no network with matching name
+            # 'xentry-target'", which says more than a message of mine would.
+            # `active or start` read better but mypy is right to refuse it -
+            # network_start returns None, so the `or` was comparing nothing.
+            try:
+                for want in (TARGET_NET, ATTACKER_NET):
+                    if not self.virsh.network_active(want):
+                        self.virsh.network_start(want)
+            except LibvirtError as exc:
+                raise BrokerError("network_create_failed", str(exc)) from exc
+        elif self.virsh.network_exists(network_name):
             if not self.virsh.network_active(network_name):
                 try:
                     self.virsh.network_start(network_name)
@@ -754,7 +986,16 @@ class BrokerRuntime:
                 self.virsh.network_start(network_name)
             except LibvirtError as exc:
                 raise BrokerError("network_create_failed", str(exc)) from exc
-        if self.apply_nft:
+        # NOT in stage 2. The phases live in the mirror VM, and this host has
+        # no address on the guests' bridges to police anything from.
+        #
+        # Leaving this ungated installed a per-job table named
+        # xentry_mirrorvm whose forward chain is POLICY DROP with no accept
+        # for traffic toward the VM - so every reply from the internet was
+        # dropped on its way back to 10.44.0.2. Queries left, answers arrived
+        # at the uplink, and nothing reached the bridge. The VM looked like it
+        # had no network at all, and the table outlived the job that made it.
+        if self.apply_nft and not self.proxy_ip:
             try:
                 self.nft.apply(
                     provisioning_rules(
@@ -770,6 +1011,8 @@ class BrokerRuntime:
                         registry_port=(
                             self.registry_port if self.start_registry_proxy else None
                         ),
+                        wan_bridge=self.wan_bridge,
+                        proxy_ip=self.proxy_ip,
                     ),
                     table=net.table,
                 )
@@ -782,7 +1025,7 @@ class BrokerRuntime:
                 raise BrokerError("network_create_failed", str(exc)) from exc
         mirror_url = net.mirror_url
         mirror_started = False
-        if self.start_mirror:
+        if self.start_mirror and not self.proxy_ip:
             if self.manifest_path is None:
                 self._cleanup_network(network_name, net.table)
                 raise BrokerError("preflight_refused", "artifact mirror manifest is not configured")
@@ -808,7 +1051,29 @@ class BrokerRuntime:
         snapshot_used = ""
         archive_used = ""
         container_apt_host = ""
-        if self.start_apt_proxy:
+        # The mirror VM, when there is one. Placed where the in-process apt
+        # proxy used to start, so the thing that serves this job's archive is
+        # decided in exactly one place either way.
+        if self.proxy_ip:
+            self.configure_mirror_vm(
+                job_id,
+                serial=apt_snapshot or "",
+                archive=apt_archive or "ubuntu",
+                # Only the ports this job actually wants: serve.py starts a
+                # listener per entry and nothing for an absent one.
+                # registry_port ONLY with a cutoff, and the cutoff with it.
+                # An unpinned registry index is the one thing a mirror must
+                # never serve, and RegistryProxy refuses to be built without
+                # one - so asking for it unconditionally made serve.py die
+                # with "missing 1 required keyword-only argument: 'cutoff'"
+                # on every job that has no ecosystem target, apache included.
+                ports={k: v for k, v in (
+                    ("apt_port", self.apt_port), ("container_apt_port", 80),
+                    ("attacker_apt_port", self.attacker_apt_port),
+                    ("registry_port", self.registry_port if registry_cutoff else 0),
+                    ("oci_port", self.oci_port), ("cutoff", registry_cutoff)) if v},
+            )
+        if self.start_apt_proxy and not self.proxy_ip:
             if job_id not in self.apt_proxies:
                 try:
                     # The app chooses the serial from the advisory date; the
@@ -880,7 +1145,7 @@ class BrokerRuntime:
             attacker_apt_proxy_url = self.attacker_proxies[job_id].url
             attacker_snapshot = self.attacker_proxies[job_id].serial
         oci_mirror_url = ""
-        if self.start_oci_mirror:
+        if self.start_oci_mirror and not self.proxy_ip:
             if job_id not in self.oci_mirrors:
                 try:
                     # `oci`, not `mirror`: that name already holds the
@@ -899,7 +1164,7 @@ class BrokerRuntime:
             oci_mirror_url = self.oci_mirrors[job_id].url
         registry_proxy_url = ""
         cutoff_used = ""
-        if self.start_registry_proxy and registry_cutoff:
+        if self.start_registry_proxy and registry_cutoff and not self.proxy_ip:
             # No cutoff means no ecosystem target on this job, so no proxy: an
             # unpinned registry is the one thing this must never serve.
             if job_id not in self.registry_proxies:
@@ -922,6 +1187,48 @@ class BrokerRuntime:
             # Recorded for the same reason the apt serial is: without the date,
             # "it installed next 16.4.0" says nothing about why that version.
             cutoff_used = self.registry_proxies[job_id].cutoff
+        if self.proxy_ip:
+            # Every mirror lives on the VM now, so the URLs the guests are
+            # handed all point at it. The ports are the ones the mirrors bind
+            # inside it, which are the ports they bound on the host - nothing
+            # a guest does changes.
+            base = f"http://{self.proxy_ip}"
+            mirror_url = f"{base}:{self.mirror_port}"
+            apt_proxy_url = f"{base}:{self.apt_port}" if self.start_apt_proxy else ""
+            attacker_apt_proxy_url = (
+                f"{base}:{self.attacker_apt_port}" if self.start_apt_proxy else ""
+            )
+            registry_proxy_url = (
+                f"{base}:{self.registry_port}"
+                if self.start_registry_proxy and registry_cutoff
+                else ""
+            )
+            oci_mirror_url = f"{base}:{self.oci_port}" if self.start_oci_mirror else ""
+            # The container runtime's apt is the one that cannot take a port:
+            # `docker build` has no flag for it, so it gets the host part only
+            # and reaches port 80 on the VM.
+            container_apt_host = self.proxy_ip
+            snapshot_used = apt_snapshot or snapshot_used
+            archive_used = apt_archive or archive_used
+            cutoff_used = registry_cutoff or cutoff_used
+            mirror_started = True
+            # Both phases are the mirror VM's to enforce from here on. A job
+            # starts in provisioning: the guests may fetch, and may not reach
+            # each other.
+            self.set_phase(
+                "provisioning",
+                target_ip=net.target_ip,
+                attacker_ip=net.attacker_ip,
+                mirror_ports=tuple(
+                    port
+                    for port in (
+                        self.mirror_port, self.apt_port, 80,
+                        self.attacker_apt_port, self.registry_port, self.oci_port,
+                    )
+                    if port
+                ),
+            )
+
         state = {
             "network_id": network_name,
             "job_id": job_id,
@@ -939,10 +1246,14 @@ class BrokerRuntime:
             "apt_archive": archive_used,
             # deb822 needs the archive's own path and its own freshness rule.
             "apt_suite_path": f"/{archive_used}" if archive_used else "",
+            # From the ARCHIVE, not from a proxy instance. This read
+            # self.apt_proxies[job_id], which exists only when a mirror runs
+            # in THIS process - so with the mirrors in the VM it raised
+            # KeyError(job_id) and the job failed as harness_error with a
+            # detail of nothing but its own id. check_valid_until is a
+            # property of debian-vs-ubuntu, and was never the proxy's to own.
             "apt_check_valid_until": (
-                self.apt_proxies[job_id].archive.check_valid_until
-                if archive_used
-                else True
+                check_archive(archive_used).check_valid_until if archive_used else True
             ),
             # Reported so the runner can provision the attacker from it, and
             # so the record says which serial armed the attacker as well as
@@ -1053,6 +1364,24 @@ class BrokerRuntime:
         raise BrokerError("network_create_failed", "no free job subnet")
 
     def _net(self, job_id: str) -> JobNet:
+        # THE ISLAND NET IS NOT RECONSTRUCTIBLE FROM A STORED OCTET.
+        #
+        # for_mirror_vm records octet=0, so every caller that rebuilt a net
+        # from stored state got for_octet(0, ...) - 10.42.0.10 and
+        # 10.42.0.20, the OLD scheme. lock_network then wrote a cross rule
+        # naming a pair of addresses no guest has:
+        #
+        #   ip saddr 10.42.0.20 ip daddr 10.42.0.10 tcp dport 80 accept
+        #
+        # while the guests were 10.43.2.20 and 10.43.1.10, so their traffic
+        # fell through to `ip saddr ${JOBS} drop`. The PoC's curl failed
+        # silently and the step reported only its own invoking line - twice,
+        # after eighteen steps had passed.
+        #
+        # It took the split bridges to expose it: on the old path the two
+        # guests shared one bridge, so this rule was never exercised at all.
+        if self.proxy_ip:
+            return JobNet.for_mirror_vm(self.mirror_port, self.proxy_ip)
         try:
             state = json.loads(self._net_path(job_id).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1131,6 +1460,52 @@ class BrokerRuntime:
             return "exploit_failed"
         return "harness_error"
 
+    def exec_generated(
+        self, vm_id: str, script_sha256: str, timeout_s: int
+    ) -> dict[str, Any]:
+        """Run a job's OWN provisioning script, digest-checked like any step.
+
+        THE PATH IS DERIVED, NEVER PASSED. It is jobs_root/<the vm's job>/
+        provision.sh, resolved from the vm_id, so job A's script cannot be run
+        against job B's VM - by construction rather than by a check somebody
+        could forget to write.
+
+        The digest comes from the runner, which recorded it when it staged the
+        bytes the model copied out. A script regenerated since then has a
+        different digest and refuses here rather than running: the digest
+        recorded is the digest executed.
+        """
+        state = self._vm_state(vm_id)
+        if state is None:
+            raise BrokerError("broker_registry_rejected", f"unknown vm_id: {vm_id}")
+        if state.get("role") != "target":
+            raise BrokerError("preflight_refused", "the generated script is the target's")
+        if not SHA256_RE.fullmatch(script_sha256 or ""):
+            raise BrokerError("broker_registry_rejected", "script_sha256 is required here")
+        script = self.jobs_root / str(state["job_id"]) / GENERATED_SCRIPT
+        if not script.is_file():
+            raise BrokerError("artifact_missing", f"no generated script at {script}")
+        if _sha256_file(script) != script_sha256:
+            raise BrokerError(
+                "artifact_hash_mismatch", "the generated script is not the recorded one"
+            )
+        ssh = SSHTransport(
+            self.jobs_root / str(state["job_id"]) / "keys" / "root",
+            "root",
+            str(state["guest_ip"]),
+            command_timeout=float(max(1, min(int(timeout_s), GENERATED_MAX_S))),
+        )
+        result = ssh.run("bash -s", input_text=script.read_text(encoding="utf-8"))
+        return {
+            "vm_id": vm_id,
+            "step_id": GENERATED_STEP,
+            "script_sha256": script_sha256,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout[:FREE_EXEC_MAX_LOG],
+            "stderr": result.stderr[:FREE_EXEC_MAX_LOG],
+            "duration_ms": result.duration_ms,
+        }
+
     def exec_step(
         self,
         vm_id: str,
@@ -1139,7 +1514,21 @@ class BrokerRuntime:
         tty: bool,
         timeout_s: int,
         trace: bool = False,
+        script_sha256: str = "",
     ) -> dict[str, Any]:
+        # THE TWO PATHS DO NOT MIX. A manifest step cannot be run through the
+        # job-digest branch, because that branch is reached only by the reserved
+        # id - and the reserved id is not in steps.yaml, so it cannot be run
+        # through the manifest branch either. Supplying script_sha256 with a
+        # manifest step is refused rather than ignored: silently dropping it
+        # would let a caller believe a digest was checked when it was not.
+        if step_id == GENERATED_STEP:
+            return self.exec_generated(vm_id, script_sha256, timeout_s)
+        if script_sha256:
+            raise BrokerError(
+                "broker_registry_rejected",
+                f"script_sha256 belongs to {GENERATED_STEP}, not {step_id}",
+            )
         spec = self._steps().get(step_id)
         try:
             registry_step = resolve_step(step_id)
@@ -1237,6 +1626,52 @@ class BrokerRuntime:
             "duration_ms": result.duration_ms,
             "truncated": len(result.stdout) > max_log or len(result.stderr) > max_log,
             "log_path": str(log_path),
+        }
+
+    def free_exec(
+        self, role: str, job_id: str, command: str, timeout_s: int
+    ) -> dict[str, Any]:
+        """Run what the caller asks, as root, in one named role's VM (ADR 0004).
+
+        THERE IS NO ROLE CHECK HERE BECAUSE THERE IS NOTHING TO CHECK. The
+        role arrives from the verb that was dispatched - free_exec_target or
+        free_exec_attacker - and the machine is resolved from the job, so no
+        caller supplies a vm_id and none can address the wrong VM. A check is
+        a thing a refactor can drop; a parameter that does not exist cannot be
+        passed wrongly.
+
+        The containment is not in this method either. It is that the VM has no
+        route to the host or to the internet, that no nonce exists while a
+        model is driving it, and that the machine which gets measured is
+        rebuilt from a snapshot by a digest-checked script and never touched.
+        """
+        if not command.strip():
+            raise BrokerError("broker_registry_rejected", "empty command")
+        state_path = self.jobs_root / job_id / role / "state.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BrokerError(
+                "broker_registry_rejected", f"no {role} VM for job {job_id}: {exc}"
+            ) from exc
+        bounded = max(1, min(int(timeout_s), FREE_EXEC_MAX_S))
+        ssh = SSHTransport(
+            self.jobs_root / str(state["job_id"]) / "keys" / "root",
+            "root",
+            str(state["guest_ip"]),
+            command_timeout=float(bounded),
+        )
+        result = ssh.run(command)
+        return {
+            "vm_id": state.get("vm_id"),
+            "role": role,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout[:FREE_EXEC_MAX_LOG],
+            "stderr": result.stderr[:FREE_EXEC_MAX_LOG],
+            "stdout_sha256": hashlib.sha256(result.stdout.encode()).hexdigest(),
+            "stderr_sha256": hashlib.sha256(result.stderr.encode()).hexdigest(),
+            "duration_ms": result.duration_ms,
+            "truncated": len(result.stdout) > FREE_EXEC_MAX_LOG,
         }
 
     def _artifact_manifest(self) -> dict[str, dict[str, Any]]:
@@ -1685,7 +2120,23 @@ class BrokerRuntime:
         for port in ports:
             if port < 1 or port > 65535:
                 raise BrokerError("broker_registry_rejected", f"invalid target port: {port}")
-        if self.apply_nft:
+        if self.proxy_ip:
+            # Stage 2: the mirror VM holds the phases, because this host has no
+            # address on the guests' bridges to police them from.
+            #
+            # mirror_ports is EMPTY on purpose. phase.sh reads that as "drop
+            # every tcp packet from either guest subnet to this VM" - not
+            # merely "stop accepting the five mirror ports" - so while the PoC
+            # runs, neither the target nor the attacker can reach a mirror at
+            # all. The services are stopped below as well, which is what makes
+            # the guarantee survive a wrong rule.
+            self.set_phase(
+                "locked",
+                target_ip=net.target_ip,
+                attacker_ip=net.attacker_ip,
+                target_ports=tuple(ports),
+            )
+        elif self.apply_nft:
             try:
                 self.nft.apply(
                     locked_rules(
@@ -1694,6 +2145,8 @@ class BrokerRuntime:
                         target_ip=net.target_ip,
                         attacker_ip=net.attacker_ip,
                         table=net.table,
+                        wan_bridge=self.wan_bridge,
+                        proxy_ip=self.proxy_ip,
                     ),
                     table=net.table,
                 )
@@ -1790,6 +2243,21 @@ class BrokerRuntime:
                 _text(params, "path"),
                 _text(params, "sha256"),
             )
+        # SPELLED OUT, not `verb in (...)`, and the params read HERE rather
+        # than in a helper. Two contract tests read this source: one wants a
+        # literal `verb == "<name>"` per routed verb, because a verb with no
+        # branch falls through to the final raise and reads as "unknown verb"
+        # rather than as a missing branch; the other wants every declared
+        # parameter named in the branch, because handle calls methods
+        # positionally and a parameter it never reads is silently discarded.
+        # Delegating to a helper satisfied the first and blinded the second.
+        if verb == "free_exec_target" or verb == "free_exec_attacker":
+            return self.free_exec(
+                verb.removeprefix("free_exec_"),
+                _text(params, "job_id"),
+                _text(params, "command"),
+                _integer(params, "timeout_s", 1, FREE_EXEC_MAX_S),
+            )
         if verb == "exec":
             inner = params.get("params", {})
             if not isinstance(inner, dict):
@@ -1813,6 +2281,7 @@ class BrokerRuntime:
                 tty,
                 _integer(params, "timeout_s", 1, 3600),
                 trace,
+                str(params.get("script_sha256") or ""),
             )
         if verb == "place_nonce":
             return self.place_nonce(

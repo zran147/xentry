@@ -342,7 +342,13 @@ class _FakeVirsh:
 #
 # This is the same shape as the setup-generic/STEPS disagreement before it, so
 # it is worth a test that reads the code rather than a test per verb.
-RENAMED_VERBS = {"exec": "exec_step"}
+RENAMED_VERBS = {
+    "exec": "exec_step",
+    # Both free verbs are one method; the role arrives from the verb name, so
+    # the machine is resolved from the job and no caller passes a vm_id.
+    "free_exec_target": "free_exec",
+    "free_exec_attacker": "free_exec",
+}
 # One deliberate rename: the wire's `params` is the step's own parameter map,
 # and a method cannot call that `params` while also being handed the request's.
 RENAMED_PARAMS = {("exec", "params"): "inner_params"}

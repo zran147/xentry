@@ -40,7 +40,14 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
+
+# timezone.utc, not datetime.UTC: UTC was added in Python 3.11 and this
+# module is copied into the mirror VM, which runs the base image's
+# python - 3.9 on Debian 11. The import failed there and took the whole
+# mirror service down:
+#   ImportError: cannot import name 'UTC' from 'datetime'
+# timezone.utc means the same thing and works on every version.
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -278,7 +285,7 @@ class RegistryProxy:
         # releases made since then do not exist, and would resolve to an older
         # version with nothing in the record to say why.
         fetched_at = (
-            datetime.fromtimestamp(cached.stat().st_mtime, UTC).strftime(STAMP)
+            datetime.fromtimestamp(cached.stat().st_mtime, timezone.utc).strftime(STAMP)
             if cached.is_file()
             else ""
         )

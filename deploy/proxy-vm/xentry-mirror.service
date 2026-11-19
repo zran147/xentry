@@ -1,0 +1,32 @@
+[Unit]
+Description=xentry mirrors (apt snapshot, registry, OCI) for one job
+Documentation=file:///opt/xentry/docs/adr/0002-mirrors-in-their-own-vm.md
+After=network-online.target nftables.service
+Wants=network-online.target
+# The egress filter must be up before anything can fetch. If nftables failed,
+# this VM has a route to the operator's LAN, so not serving is the correct
+# outcome rather than serving unfiltered.
+Requires=nftables.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/xentry-mirror/serve.py
+Restart=on-failure
+RestartSec=2
+# It serves cached bytes over HTTP and needs no more than that.
+User=xentry-mirror
+Group=xentry-mirror
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/cache/xentry-mirror
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

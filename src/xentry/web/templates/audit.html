@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_evidence.html" as evidence %}
 {% set job = bundle.job %}
 {% block content %}
 <section class="panel">
@@ -20,44 +21,64 @@
   </dl>
 </section>
 
-<section class="panel">
-  <h2>Success criteria</h2>
-  <p class="muted">From the pinned target definition, not from the model.</p>
-  {% if proves %}
-  <p><strong>A pass proves</strong></p>
-  <ul>{% for item in proves %}<li>{{ item }}</li>{% endfor %}</ul>
-  {% endif %}
-  {% if not_proves %}
-  <p><strong>It does not prove</strong></p>
-  <ul class="muted">{% for item in not_proves %}<li>{{ item }}</li>{% endfor %}</ul>
-  {% endif %}
-  {% if not proves and not not_proves %}
-  <p class="muted">No criteria recorded for this target.</p>
-  {% endif %}
-</section>
-
-<section class="panel">
+<section class="panel" id="model-calls">
   <h2>Model calls</h2>
-  <p class="muted">
-    Each stage is a single request and a single reply; the agent is configured with no
-    tools, so there are no tool calls to show. Text is rendered only when it still
-    matches the sha256 recorded at capture time.
-  </p>
+  {#- NO DESCRIPTION HERE, ON PURPOSE. What this card is was two paragraphs of
+      prose above the stages; the stages say it themselves. Kept as a comment
+      because a reader of this template needs it: each stage is one request
+      and one reply, the agent is configured with no tools, text is rendered
+      only while it matches the sha256 recorded at capture time, and a stage's
+      Reasoning is what the provider returned separately from its answer. Jobs
+      recorded before that was captured show Question and Response only. #}
+  {#- WHY THERE IS NO extract STAGE HERE.
+      A job submitted with a check_id reuses the facts that check stored and
+      never calls the extractor again - runner.py loads them rather than
+      re-reading the same bytes, because a second reading can produce a
+      different plan than the one the operator approved. So the only model
+      call that happens DURING a job is validate. The extraction's prompt and
+      reply are real and kept; they live under the check, which is what this
+      offers. #}
+  {% if job.check_id %}
+  <div data-check="{{ job.check_id }}" data-check-stages>
+    <p class="muted">
+      The extractor ran when the links were checked, before this job existed,
+      under check <span class="mono">{{ job.check_id[:12] }}</span>. Loading its
+      stages...
+    </p>
+  </div>
+  {% endif %}
   {% if llm %}
-    {% for call in llm %}
-    <h3 class="mono">{{ call.stage }}</h3>
+    {#- A stage's reasoning is recorded as "<stage>.reasoning" and rendered as
+        a caret inside that stage, not as a block of its own: one model call
+        should not read as two unrelated things. #}
+    {% for call in llm if not call.stage.endswith(".reasoning") %}
+    {% set mind = llm | selectattr("stage", "equalto", call.stage ~ ".reasoning") | first %}
+    <h3 class="mono" id="stage-{{ call.stage }}">{{ call.stage }}</h3>
+    {#- HASHES ONLY. The sizes used to sit here too, directly above two carets
+        that now carry them - the same number twice, and the copy nobody reads
+        while deciding whether to open a transcript. The digests stay: they
+        are what an audit is for, and they have nowhere else to be. #}
     <dl class="facts">
-      <dt>Prompt</dt><dd><span class="mono">{{ call.prompt_sha256[:16] or "-" }}</span> · {{ call.prompt_bytes or 0 }} bytes</dd>
-      <dt>Response</dt><dd><span class="mono">{{ call.response_sha256[:16] or "-" }}</span> · {{ call.response_bytes or 0 }} bytes</dd>
+      <dt>Prompt</dt><dd><span class="mono">{{ call.prompt_sha256[:16] or "-" }}</span></dd>
+      <dt>Response</dt><dd><span class="mono">{{ call.response_sha256[:16] or "-" }}</span></dd>
     </dl>
+    {#- The byte count sits beside the caret, as it already did for
+        Reasoning: the facts list above repeats it, but the point of a closed
+        caret is to say whether opening it is worth it. #}
     <details>
-      <summary>Question</summary>
+      <summary>Question <span class="muted">· {{ call.prompt_bytes or 0 }} bytes</span></summary>
       <pre class="plan">{{ call.prompt or "[not captured]" }}</pre>
     </details>
     <details>
-      <summary>Response</summary>
+      <summary>Response <span class="muted">· {{ call.response_bytes or 0 }} bytes</span></summary>
       <pre class="plan">{{ call.response or "[not captured]" }}</pre>
     </details>
+    {% if mind and mind.response %}
+    <details>
+      <summary>Reasoning <span class="muted">· {{ mind.response_bytes or 0 }} bytes</span></summary>
+      <pre class="plan">{{ mind.response }}</pre>
+    </details>
+    {% endif %}
     {% endfor %}
   {% else %}
   <p class="muted">No transcript recorded. Jobs run before transcript capture was added store only the validator prompt hash, shown under Validation below.</p>
@@ -81,6 +102,24 @@
   {% else %}
   <p class="muted">No validation row.</p>
   {% endif %}
+  {#- The claims this verdict is measured against, next to the verdict rather
+      than in a panel of their own, and closed: a reader who wants them opens
+      them. Closed by default is the point - no `open` attribute. #}
+  <details>
+    <summary>Success criteria</summary>
+    <p class="muted">From the pinned target definition, not from the model.</p>
+    {% if proves %}
+    <p><strong>A pass proves</strong></p>
+    <ul>{% for item in proves %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if not_proves %}
+    <p><strong>It does not prove</strong></p>
+    <ul class="muted">{% for item in not_proves %}<li>{{ item }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if not proves and not not_proves %}
+    <p class="muted">No criteria recorded for this target.</p>
+    {% endif %}
+  </details>
 </section>
 
 <section class="panel">
@@ -145,19 +184,15 @@
 
 <section class="panel">
   <h2>Artifacts <span class="muted">({{ bundle.artifacts | length }})</span></h2>
-  <table>
-    <thead><tr><th>Kind</th><th>sha256</th><th>Bytes</th><th></th></tr></thead>
-    <tbody>
-      {% for a in bundle.artifacts %}
-      <tr>
-        <td class="mono">{{ a.kind }}</td>
-        <td class="mono">{{ (a.sha256 or "-")[:16] }}</td>
-        <td>{{ a.bytes }}</td>
-        <td><a href="/api/jobs/{{ job.id }}/evidence/{{ a.id }}">download</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {#- The same macro as the job page's Evidence card. This card used to show
+    only a kind, a hash and the word "download", so the one place that lists
+    EVERY artifact - llm_* rows included - was the least legible.
+
+    No format is shown here and no Rendered button is offered: the audit page
+    has no sniffed media map, and View serves the bytes as their own source,
+    which is what an audit wants. #}
+  {{ evidence.table(job.id, bundle.artifacts, {}, "",
+       "No artifacts recorded for this job.") }}
 </section>
 
 <section class="panel">

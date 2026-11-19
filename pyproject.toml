@@ -45,6 +45,20 @@ package = true
 line-length = 100
 target-version = "py312"
 
+# The three modules copied into the mirror VM run on the BASE IMAGE's python,
+# not this host's. Debian 11 ships 3.9, and ruff's UP017 rewrites
+# `timezone.utc` into `datetime.UTC` - which does not exist before 3.11. So
+# `ruff --fix` actively undid the portability fix and the service failed again
+# inside the VM with
+#   ImportError: cannot import name 'UTC' from 'datetime'
+#
+# UP017 is off for exactly these files, and a test asserts they stay parseable
+# and name-clean for 3.9.
+[tool.ruff.lint.per-file-ignores]
+"broker/aptproxy.py" = ["UP017"]
+"broker/ociproxy.py" = ["UP017"]
+"broker/registryproxy.py" = ["UP017"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

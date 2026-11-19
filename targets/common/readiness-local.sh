@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# A pipeline ending in `grep -q` is a trap under `set -o pipefail`: grep exits
+# at its first match and closes the pipe, the writer dies of SIGPIPE, and
+# pipefail reports 141 for a pipeline that FOUND what it was looking for. It
+# only bites once the writer exceeds the 64KB pipe buffer, so it is invisible
+# on small inputs and intermittent on growing ones. `grep -c` reads to the end,
+# so there is no early close and no signal.
 # Readiness for a local privesc job. Runs as xentry-guest ON THE TARGET.
 # Args: package expected_version
 #
@@ -47,7 +53,7 @@ if [ -n "$package" ] && [ -n "$cve_id" ]; then
   [[ "$cve_id" =~ ^CVE-[0-9]{4}-[0-9]{4,7}$ ]] || { echo "bad cve_id" >&2; exit 2; }
   changelog="/usr/share/doc/$package/changelog.Debian.gz"
   if [ -f "$changelog" ]; then
-    if zcat "$changelog" | grep -q -- "$cve_id"; then
+    if [ "$(zcat "$changelog" | grep -c -- "$cve_id" || true)" -gt 0 ]; then
       echo "the installed $package names $cve_id in its changelog, so this" >&2
       echo "build carries the fix and the exploit would fail for that reason" >&2
       exit 1

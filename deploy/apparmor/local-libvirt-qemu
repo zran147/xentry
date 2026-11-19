@@ -19,9 +19,11 @@
   audit deny /var/lib/xentry/artifacts/** mrwklx,
   audit deny /var/lib/xentry/mirror/** mrwklx,
 
-  # Code: the app venv and the root broker.
+  # Code: the one tree, both venvs. This denied /opt/xentry-broker too, until
+  # the duplicate clone was collapsed; the remaining rule already covered it.
+  # That this rule has always been in force is also the evidence QEMU reads
+  # nothing from the code tree - base images come from the path granted below.
   audit deny /opt/xentry/** mrwklx,
-  audit deny /opt/xentry-broker/** mrwklx,
 
   # Pinned base images are read through the overlay backing chain, so reads
   # must stay allowed; writes to them never are. Locking must also stay

@@ -7,21 +7,26 @@ from pathlib import Path
 
 import pytest
 
-from xentry.db import DatabaseError, init_db, migrate
+from xentry.db import MIGRATIONS, DatabaseError, init_db, migrate
+
+# The newest migration on disk. Hard-coding this number meant every
+# migration broke six unrelated tests, which teaches editing the
+# assertion instead of reading it.
+LATEST_MIGRATION = max(int(p.name.split("_", 1)[0]) for p in MIGRATIONS.glob("*.sql"))
 
 
 def test_migration_creates_schema(tmp_path: Path) -> None:
     conn = init_db(tmp_path / "xentry.db")
     try:
         version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-        assert version == 7
+        assert version == LATEST_MIGRATION
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         tables = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert {"jobs", "attempts", "job_steps", "nonces", "link_checks", "job_outcomes"} <= tables
-        assert migrate(conn) == 7
+        assert migrate(conn) == LATEST_MIGRATION
     finally:
         conn.close()
 

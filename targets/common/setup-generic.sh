@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# A pipeline ending in `grep -q` is a trap under `set -o pipefail`: grep exits
+# at its first match and closes the pipe, the writer dies of SIGPIPE, and
+# pipefail reports 141 for a pipeline that FOUND what it was looking for. It
+# only bites once the writer exceeds the 64KB pipe buffer, so it is invisible
+# on small inputs and intermittent on growing ones. `grep -c` reads to the end,
+# so there is no early close and no signal.
 # Provision a derived target: install packages from the job's pinned apt
 # snapshot and enable named units. Runs as root in the target VM.
 # Args: apt_proxy_url suite packages units sources_format ports archive
@@ -212,7 +218,17 @@ fi
 
 cat > /etc/apt/apt.conf.d/99xentry <<EOF
 Acquire::Retries "3";
-Acquire::http::Timeout "60";
+# 300, not 60. A cold proxy cache against a snapshot host is slow: the first
+# fetch of a large index can exceed a minute, apt breaks the pipe, and the
+# mirror logs BrokenPipeError while still completing the fetch. The retry then
+# hits the warm cache and succeeds - so this recovered by luck, twice, 73
+# seconds apart, and only because Retries is 3.
+#
+# The attacker is the worst case: its archive is unpinned, so its indices are
+# fetched fresh the first time any job needs them. The cache in the VM
+# persists across jobs, so this cost is paid once - but it should not be paid
+# as a near-timeout.
+Acquire::http::Timeout "300";
 APT::Install-Recommends "false";
 APT::Install-Suggests "false";
 EOF
@@ -418,7 +434,11 @@ if [ -n "$artifacts" ]; then
   if [ -n "$debs" ]; then
     # shellcheck disable=SC2086 - every name was validated above
     dpkg -i $debs || apt-get install -y -f
-    dpkg -l | grep -q "^i" || { echo "the debs did not install" >&2; exit 1; }
+    # NOTE: this only asserts SOME package is installed, true of any Debian
+    # system - close to vacuous. Left as it is rather than silently changing
+    # what the step verifies; the bug fixed here is the SIGPIPE.
+    [ "$(dpkg -l | grep -c "^i" || true)" -gt 0 ] ||
+      { echo "the debs did not install" >&2; exit 1; }
     printf 'installed %s\n' "$debs"
   fi
 
@@ -595,8 +615,8 @@ for port in $ports; do
     addresses="$(bound_on "$port")"
     # A reachable bind is anything that is not loopback: 0.0.0.0, ::, * or the
     # guest's own address. Loopback alone is the case worth naming.
-    if [ -n "$addresses" ] && printf '%s\n' "$addresses" \
-        | grep -qvE '^(127\.[0-9.]+|\[?::1\]?)$'; then
+    if [ -n "$addresses" ] && [ "$(printf '%s\n' "$addresses" \
+          | grep -cvE '^(127\.[0-9.]+|\[?::1\]?)$' || true)" -gt 0 ]; then
       printf 'port %s is served on %s\n' "$port" "$(printf '%s' "$addresses" | tr '\n' ' ')"
       break
     fi
@@ -635,10 +655,12 @@ for port in $ports; do
           # guest's address, so wait for exactly that before going on.
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             addresses="$(bound_on "$port")"
-            printf '%s\n' "$addresses" | grep -qvE '^(127\.[0-9.]+|\[?::1\]?)$' && break
+            [ "$(printf '%s\n' "$addresses" \
+              | grep -cvE '^(127\.[0-9.]+|\[?::1\]?)$' || true)" -gt 0 ] && break
             sleep 1
           done
-          if printf '%s\n' "$addresses" | grep -qvE '^(127\.[0-9.]+|\[?::1\]?)$'; then
+          if [ "$(printf '%s\n' "$addresses" \
+            | grep -cvE '^(127\.[0-9.]+|\[?::1\]?)$' || true)" -gt 0 ]; then
             printf 'port %s is served on %s\n' "$port" \
               "$(printf '%s' "$addresses" | tr '\n' ' ')"
             break

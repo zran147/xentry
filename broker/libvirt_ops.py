@@ -206,16 +206,38 @@ def network_xml(
     attacker_mac: str | None = None,
     attacker_ip: str | None = None,
     gateway: str = "10.42.0.1",
+    forward: str = "none",
 ) -> str:
+    # gateway="" builds a network with NO <ip> element: a pure layer-2 island
+    # with no address on this host and no dnsmasq. That is what stage 2 of
+    # ADR 0002 needs - the guests must have no bridge to the host at all, so
+    # the mirror VM is their only neighbour, their router, and their DHCP.
+    #
+    # Nothing can be filtered by this host on such a bridge (br_netfilter is
+    # not loaded, so two VMs on one bridge talk at layer 2 and never reach the
+    # forward hook), which is exactly why the phase rules move into the mirror
+    # VM along with the address.
     # One /24 per job, so the range follows whichever gateway it was given.
     prefix = gateway.rsplit(".", 1)[0]
     hosts = f'      <host mac="{_esc(target_mac)}" ip="{_esc(target_ip)}"/>\n'
     if attacker_mac and attacker_ip:
         hosts += f'      <host mac="{_esc(attacker_mac)}" ip="{_esc(attacker_ip)}"/>\n'
+    if not gateway:
+        return (
+            "<network>\n"
+            f"  <name>{_esc(name)}</name>\n"
+            f"  <forward mode='{_esc(forward)}'/>\n"
+            f"  <bridge name='{_esc(bridge)}' stp='on' delay='0'/>\n"
+            "</network>\n"
+        )
     return (
         "<network>\n"
         f"  <name>{_esc(name)}</name>\n"
-        "  <forward mode='none'/>\n"
+        # "none" for a job network: an island, which is what makes the guests
+        # unable to route anywhere. "nat" for the mirror VM's own network, the
+        # single place in this system that is allowed to reach the internet
+        # (ADR 0002). Nothing else should ever pass anything but the default.
+        f"  <forward mode='{_esc(forward)}'/>\n"
         f"  <bridge name='{_esc(bridge)}' stp='on' delay='0'/>\n"
         f"  <ip address='{_esc(gateway)}' netmask='255.255.255.0'>\n"
         "    <dhcp>\n"
@@ -236,6 +258,10 @@ def domain_xml(
     seed_path: Path,
     network_name: str,
     mac: str,
+    # (network, mac) for every NIC after the first. The mirror VM needs one
+    # per job bridge once it routes between the target and the attacker, and
+    # a VM with one interface cannot be a router.
+    extra_nics: tuple[tuple[str, str], ...] = (),
     qemu_user: str | None = None,
     serial_path: Path | None = None,
     serial_log_path: Path | None = None,
@@ -295,12 +321,16 @@ def domain_xml(
         "      <target dev='sda' bus='sata'/>\n"
         "      <readonly/>\n"
         "    </disk>\n"
-        "    <interface type='network'>\n"
-        f"      <source network='{_esc(network_name)}'/>\n"
-        f"      <mac address='{_esc(mac)}'/>\n"
-        f"{interface_driver}"
-        "      <model type='virtio'/>\n"
-        "    </interface>\n"
+        + "".join(
+            "    <interface type='network'>\n"
+            f"      <source network='{_esc(net)}'/>\n"
+            f"      <mac address='{_esc(hw)}'/>\n"
+            f"{interface_driver}"
+            "      <model type='virtio'/>\n"
+            "    </interface>\n"
+            for net, hw in ((network_name, mac), *extra_nics)
+        )
+        + 
         f"{serial}"
         "  </devices>\n"
         "</domain>\n"

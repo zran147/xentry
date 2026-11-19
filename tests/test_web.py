@@ -21,6 +21,9 @@ POC_URL = "https://github.com/78ResearchLab/PHP2Shell-Full-Chain-Exploit"
 class FakeRunner:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, str, str | None, str | None]] = []
+        # Kept apart from `submitted`, whose tuple shape existing assertions
+        # already index by position.
+        self.harnessed: list[bool] = []
 
     def start(self) -> None:
         return None
@@ -35,8 +38,10 @@ class FakeRunner:
         *,
         check_id: str | None = None,
         bundle_sha256: str | None = None,
+        harness: bool = False,
     ) -> str:
         self.submitted.append((cve_url, poc_url, check_id, bundle_sha256))
+        self.harnessed.append(harness)
         return "job-abc"
 
 
@@ -655,7 +660,10 @@ def test_audit_page_shows_criteria_and_transcript(tmp_path: Path) -> None:
         # the captured call is shown
         assert "QUESTION-MARKER" in body
         assert "ANSWER-MARKER" in body
-        assert "no tool calls to show" in body
+        # The card no longer carries a paragraph describing itself (the two
+        # blurbs, "no tool calls to show" among them, were removed on request),
+        # so what is pinned here is the stage block the transcript renders into.
+        assert 'id="stage-extract"' in body
 
 
 def test_audit_page_hides_tampered_transcript(tmp_path: Path) -> None:

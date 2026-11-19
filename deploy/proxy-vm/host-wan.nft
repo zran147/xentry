@@ -1,0 +1,74 @@
+#!/usr/sbin/nft -f
+# The HOST's permanent rules for the mirror VM's bridge (ADR 0002).
+#
+# WHY THIS FILE EXISTS, AND WHY IT IS NOT IN THE PER-JOB TABLE.
+#
+# The per-job `xentry` table is applied in create_network and cleared in
+# cleanup, so between jobs it does not exist - and the rule that stops the
+# mirror VM reaching this host was in it. The VM is PERSISTENT and has
+# internet access, so for most of its life nothing on this host stood between
+# it and port 8000, where the app answers without authentication.
+#
+# A persistent VM needs a persistent rule. This table is separate from the
+# per-job one so the two never collide: a job's table comes and goes
+# underneath this one, and a drop in either kills the packet, which is exactly
+# the behaviour wanted here.
+#
+# Loaded by scripts/proxy-vm-up.sh and again at boot by
+# xentry-wan-firewall.service.
+
+# IDEMPOTENT, and this file must be.
+#
+# Loading it twice - once by proxy-vm-up.sh, once by the unit's ExecStart -
+# APPENDED a second copy of every rule, because nft adds to a table that
+# already exists. Functionally the first drop still won, but the table grew on
+# every reload and a duplicated ruleset is one nobody can read.
+#
+# `table` then `delete` is the portable idiom: the first line creates the
+# table if it is absent, so the delete cannot fail, and what follows defines
+# it fresh.
+#
+# NOT `flush ruleset`. That belongs in the VM's own file, where the whole
+# ruleset is ours. Here it would delete libvirt's NAT rules for every network
+# and the per-job xentry table with them, mid-job.
+table inet xentry_wan
+delete table inet xentry_wan
+
+table inet xentry_wan {
+  chain input {
+    type filter hook input priority 0; policy accept;
+
+    # Replies to the broker, which ssh's into the VM to write job.json. The
+    # absence of this rule is what made that step hang the first time.
+    iifname "xentrywan0" ct state established,related accept
+
+    # DHCP. The VM's address is pinned by libvirt rather than configured
+    # statically, because the static route required renaming its NIC and the
+    # rename left it answering nothing.
+    iifname "xentrywan0" udp dport 67 accept
+
+    # Everything else this VM sends to this host. No ssh, no broker socket,
+    # and no port 8000.
+    iifname "xentrywan0" drop
+  }
+
+  chain forward {
+    # policy accept, NOT drop: a job's own table has a forward chain with
+    # policy drop that governs the guests, and a second drop policy here would
+    # block the mirror traffic that table is carefully allowing. This chain
+    # names only what must never be reachable, whatever any other table says.
+    type filter hook forward priority 0; policy accept;
+
+    # The operator's LAN - where this host and the workstation that drives it
+    # live - and the host's docker bridge. Neither has any business being
+    # routed to from a VM whose job is to fetch packages.
+    iifname "xentrywan0" ip daddr 192.168.136.0/23 drop
+    iifname "xentrywan0" ip daddr 172.16.0.0/12 drop
+    iifname "xentrywan0" ip daddr 169.254.0.0/16 drop
+
+    # Job networks are reachable only as replies. The mirror answers a guest;
+    # it never opens a connection to one. Between jobs there are no guests at
+    # all, and this rule is then simply unused.
+    iifname "xentrywan0" oifname "xentry*" ct state new drop
+  }
+}

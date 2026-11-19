@@ -1,8 +1,12 @@
 {% extends "base.html" %}
+{% import "_evidence.html" as evidence %}
 {% block content %}
 <div id="job-data"
      data-job-id="{{ job.id }}"
      data-outcome="{{ job.outcome or '' }}"
+     {#- The route, so the browser knows whether this job has a session to
+         poll for at all. A non-harness job never writes one. -#}
+     data-kind="{{ job.get('kind') or '' }}"
      data-created-at="{{ job.created_at or '' }}"
      data-started-at="{{ job.started_at or '' }}"
      hidden></div>
@@ -35,6 +39,17 @@
     <dd class="urlcell">
       {%- if links.poc_href %}<a href="{{ links.poc_href }}" target="_blank" rel="noreferrer noopener">{{ links.poc_text }}</a>
       {%- else %}{{ links.poc_text or "-" }}{% endif %}
+    </dd>
+    {#- Which route produced this job. Two jobs can both end verdict=reproduced
+        and still not be the same claim: in a harness job the environment was
+        built by a model's own commands rather than by a reviewed script (ADR
+        0003, "What the record must say"). No data-field here - the route is
+        fixed at submit, and updateFacts() would overwrite the sentence with
+        the raw kind on the next poll. -#}
+    <dt>Route</dt>
+    <dd>
+      {%- if job.get("kind") == "harness_job" %}harness - the model built the target itself
+      {%- else %}no harness - a reviewed provisioning script{% endif %}
     </dd>
     <dt>State</dt><dd data-field="state"><span class="pill" data-status="{{ job.state }}">{{ job.state }}</span></dd>
     <dt>Verdict</dt><dd data-field="verdict"><span class="pill" data-status="{{ job.verdict or 'not_run' }}">{{ job.verdict or "not_run" }}</span></dd>
@@ -70,6 +85,29 @@
         <td class="mono ts" data-fmt="time" data-ts="{{ step.started_at or '' }}">{{ step.started_at or "-" }}</td>
         <td class="mono ts" data-fmt="time" data-ts="{{ step.finished_at or '' }}">{{ step.finished_at or "-" }}</td>
       </tr>
+      {#- The live feed, inside the provision row and open by default: on a
+          harness job that row is where the provisioning actually happened, so
+          the session belongs under it rather than in a card of its own. The
+          container is rendered empty and filled by app.js - from one poll for
+          a finished job, and appended to as the records arrive for a running
+          one. Only a harness job has a session; anything else would draw an
+          empty card on every job page. -#}
+      {%- if step.name == "provision" and job.get("kind") == "harness_job" %}
+      <tr class="step-detail" data-detail="session:provision">
+        <td colspan="7">
+          <div class="cmdblock" id="session-card">
+            <p class="cmdblock-title">
+              <span class="name">model session</span>
+              {#- Says hash-chained because that is the claim being made: the
+                  sequence shown is the sequence that ran. Every line carries
+                  its own hash and the one before it. -#}
+              <span class="meta" id="session-meta">hash-chained</span>
+            </p>
+            <ol class="cmdlog sessionlog" id="session-feed"></ol>
+          </div>
+        </td>
+      </tr>
+      {%- endif %}
       {%- if step.state == "failed" and step.detail %}
       <tr class="step-detail" data-detail="fail:{{ step.seq }}">
         <td colspan="7">
@@ -130,25 +168,12 @@
 
 <section class="panel">
   <h2>Evidence</h2>
-  {% if artifacts %}
-  <ul>
-    {%- for artifact in artifacts %}
-    {%- set href = "/api/jobs/" ~ job.id ~ "/evidence/" ~ artifact.id %}
-    <li>
-      <a href="{{ href }}">{{ artifact.kind }}</a>
-      <span class="evidence-actions">
-        {%- if media.get(artifact.id) == "html" %}
-        <a href="{{ href }}?view=render">rendered</a>
-        {%- endif %}
-        <a href="{{ href }}?view=download">download</a>
-      </span>
-      <span class="muted mono">{{ artifact.sha256[:16] }}</span>
-      <span class="muted">&middot; {{ artifact.bytes }} bytes</span>
-    </li>
-    {%- endfor %}
-  </ul>
-  {% else %}
-  <p class="muted">No recorded artifacts yet.</p>
-  {% endif %}
+  {#- Rendered by the shared macro, so this card and the audit page's
+    Artifacts card cannot describe the same bytes differently again. The
+    format in each label is SNIFFED (evidence_media), which is why the
+    advisory row no longer claims to be a page when it holds JSON. #}
+  {{ evidence.table(job.id, artifacts, media, "llm_",
+       "No recorded artifacts yet. The model's prompts and replies are on the"
+       " audit page.") }}
 </section>
 {% endblock %}

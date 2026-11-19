@@ -4,12 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import asyncssh
+
+# The mirror VM every guest command is tunnelled through (ADR 0002).
+# XENTRY_SSH_JUMP="" disables it, which is how the smoke scripts reach a
+# guest on a network this host still has an address on. The key path does
+# not vary - the bring-up writes it - so it is a constant, not an override.
+JUMP_HOST = "10.44.0.2"
+JUMP_KEY = "/etc/xentry/proxy-vm.key"
+# WHERE THE TUNNEL SAYS WHY IT FAILED. With a proxy command, a refused inner
+# connection reaches asyncssh as "Connection lost" - the proxy just closed its
+# pipe - so EHOSTUNREACH, a wrong key and an unreachable guest all arrive
+# looking identical. ssh's own -E log keeps the real reason:
+#     connect to host 10.43.1.10 port 22: Connection refused
+# asyncssh discards the proxy's stderr, so without this the reason is gone.
+# (the path is inline in the command below, to spend no line on a constant)
+#
+# -v as well, and not for taste: with -E alone the log came back EMPTY while
+# the VM's neighbour table showed `10.43.1.10 dev ens3 FAILED` at the same
+# moment. A -W forwarding failure is logged at VERBOSE level, so the single
+# line worth having was the one being filtered out.
 
 
 class SSHError(RuntimeError):
@@ -41,8 +61,39 @@ class SSHTransport:
         self.port = port
         self.connect_timeout = connect_timeout
         self.command_timeout = command_timeout
+        # Read here rather than passed, because runtime.py builds an
+        # SSHTransport in seven places and none of them should have to know.
+        self.jump = os.environ.get("XENTRY_SSH_JUMP", JUMP_HOST)
 
     async def _connect(self) -> asyncssh.SSHClientConnection:
+        # THROUGH the mirror VM, so this host needs no route to a job subnet.
+        #
+        # %h AND %p ARE NOT SUBSTITUTED HERE, so the host and port are
+        # interpolated directly. asyncssh stores proxy_command as a token list
+        # via split_args and execs it; nothing in the package touches %h at
+        # all - that is an OpenSSH client feature. With the placeholders left
+        # in, every attempt ran
+        #
+        #     ssh ... -W %h:%p root@10.44.0.2
+        #
+        # which is a bad forwarding specification, so ssh exited at once,
+        # asyncssh saw EOF, and the readiness loop reported "Connection lost"
+        # thirty times in sixty seconds. The usage error goes to STDERR, not
+        # to the -E log, which is why that log stayed empty and made the
+        # tunnel look like it had never run - while the identical command
+        # worked by hand, because a hand-typed ProxyCommand goes through
+        # OpenSSH, which does expand %h and %p.
+        #
+        # proxy_command rather than asyncssh's tunnel=: a STRING tunnel is
+        # built with only passphrase and config, never client_keys, so it
+        # would hunt for ~/.ssh/id_* and never find the proxy key; a tunnel
+        # OBJECT is not closed by asyncssh, so every command would leak one.
+        # asyncssh owns the proxy subprocess and reaps it.
+        jump = (
+            f"ssh -i {JUMP_KEY} -v -E /var/lib/xentry/jump.log"
+            f" -W {self.host}:{self.port} -o StrictHostKeyChecking=no"
+            f" -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@{self.jump}"
+        )
         return await asyncssh.connect(
             self.host,
             port=self.port,
@@ -50,6 +101,7 @@ class SSHTransport:
             client_keys=[str(self.key_path)],
             known_hosts=None,
             login_timeout=self.connect_timeout,
+            proxy_command=jump if self.jump else (),
         )
 
     async def _run(self, command: str, input_text: str | None) -> CommandResult:

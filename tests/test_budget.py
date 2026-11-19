@@ -7,7 +7,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_ROOTS = ("src", "broker", "scripts")
-MODULE_CAP = 52
+MODULE_CAP = 53
+# A NOTE ON HOW THESE RAISES ARE ASKED FOR, added 2026-11-18 at the user's
+# instruction. When a change does not fit, say how many lines it needs and
+# stop. Do not pack signatures, collapse dict literals or move docstrings into
+# comments to satisfy the counter: comments and blank lines are free, so
+# formatting is an easy way to make an overrun invisible, and cramped code is
+# where most of this project's bugs have come from. The harness wiring was
+# written, measured at 108 against 53 available, and reverted rather than
+# squeezed - that was right; the rounds of column-packing before it were not.
+#
+# 14,654 -> 14,699 -> 14,769 -> 14,949 -> 15,019 -> 15,069 -> 15,179 and the
+# module cap 52 -> 53 on
+# 2026-11-18, for harness mode: ADR 0003 (the model provisions the target) and
+# ADR 0004 (free_exec and the tool surface). Each of the three line raises was
+# asked for and granted separately, against a staged estimate the ADR records:
+# 45 for the switch and the kind, 70 for the broker gate, 180 for the tool
+# layer and the verification. The module cap moved with the third because that
+# stage is two new modules - src/xentry/harness.py, the tool layer that is the
+# trust boundary, and src/xentry/statediff.py, the comparison that decides
+# whether a generated script rebuilt what the model explored.
+#
+# They are two files rather than one on purpose. statediff imports nothing but
+# __future__ and typing, and a test asserts that by walking its AST: a module
+# that cannot read a machine cannot be fooled into reporting on the wrong one.
+# Folding it into harness.py, which needs dataclasses, would have cost that
+# proof to save a module.
+#
 # Raised twice on 2026-11-14, which is the explicit budget change gate G14
 # asks for; ADR entries 28a and 30a record both. 12,400 -> 12,600 paid for the
 # PoC's recursive file tree as evidence and for placing an approved file where
@@ -34,7 +60,7 @@ MODULE_CAP = 52
 # and the room they actually needed was known. Entry 37 spent 44 of it: the
 # per-check transcript, the PoC's own source files as evidence, value-ordered
 # versions, the nginx placement. One spare module and 62 lines remain.
-LINE_CAP = 14_381
+LINE_CAP = 15_241
 
 
 def python_files() -> list[Path]:

@@ -121,3 +121,58 @@ def test_the_step_is_in_both_allowlists_and_reuses_the_generic_script() -> None:
     assert spec["params"] == steps["setup-generic"]["params"]
     script = root / "targets" / spec["script"]
     assert hashlib.sha256(script.read_bytes()).hexdigest() == spec["sha256"]
+
+
+def test_every_step_script_hash_in_the_manifest_is_current() -> None:
+    """A stale sha256 in steps.yaml makes the broker refuse the step.
+
+    The hashes are enforced (broker/steps.py reads the expected digest), so
+    editing a step script without updating the manifest turns into a refusal
+    at the moment the step runs. This recomputes every one, so the edit and
+    the manifest cannot drift apart.
+    """
+    import hashlib
+    import pathlib
+    import re
+
+    # The REPO, not /opt/xentry-broker: these assert what we are about to
+    # ship, so they must pass before an install, not after it.
+    root = pathlib.Path(__file__).resolve().parents[1]
+    manifest = root / "targets/steps.yaml"
+
+    text = manifest.read_text()
+    pairs = re.findall(
+        r"script:\s*(\S+)\s*\n\s*sha256:\s*([0-9a-f]{64})", text
+    )
+    assert pairs, "no script/sha256 pairs found - has the format changed?"
+
+    stale = []
+    for rel, expected in pairs:
+        path = root / "targets" / rel
+        if not path.exists():
+            stale.append(f"{rel}: missing")
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            stale.append(f"{rel}: manifest {expected[:12]}, file {actual[:12]}")
+    assert not stale, "steps.yaml is out of date:\n  " + "\n  ".join(stale)
+
+
+def test_apt_waits_long_enough_for_a_cold_proxy_cache() -> None:
+    """60s was not enough for a first fetch through the mirror VM.
+
+    A cold cache against a snapshot host is slow: the first fetch of a large
+    index exceeded a minute, apt broke the pipe, and the mirror logged
+    BrokenPipeError while still completing the fetch. The retry hit the warm
+    cache and succeeded - so it recovered by luck, twice, 73 seconds apart,
+    and only because Acquire::Retries is 3.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "targets/common/setup-generic.sh"
+    )
+    text = script.read_text()
+    assert 'Acquire::http::Timeout "300";' in text
+    assert 'Acquire::Retries "3";' in text

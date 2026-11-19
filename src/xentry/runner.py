@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from xentry import ecosystem, generic, pocgen, release, sourcestore, transcript
+from xentry import ecosystem, generic, harness, pocgen, release, sourcestore, transcript
 from xentry.broker import BrokerClient, BrokerError
 from xentry.db import connect
 from xentry.extract import ArtifactText, ExtractorError, extract
@@ -47,6 +47,7 @@ from xentry.jobstore import (
     record_outcome,
     record_validation,
     request_cancel,
+    session_event,
     set_cleanup_state,
     set_final_attempt,
     set_plan,
@@ -79,6 +80,12 @@ PANIC_MARKS = (
     "general protection fault",
     "Oops: ",
 )
+
+
+# How many revert-and-rebuild verifications one harness job may pay for. A
+# settings page owns this later; three is enough to see a model converge and
+# few enough that a wrong one costs minutes rather than an afternoon.
+HARNESS_READINESS_CALLS = 3
 
 
 class RunnerFailure(RuntimeError):
@@ -277,6 +284,10 @@ class JobRunner:
         broker_socket: Path,
         extract_fn: Callable[[list[ArtifactText]], Any] = extract,
         validate_fn: Callable[[RunnerFacts, NarrativeBundle], Any] = assess,
+        provision_fn: Callable[
+            [str, Callable[[str, dict[str, Any]], dict[str, Any]]], Callable[[str], str]
+        ]
+        | None = None,
         fetch_fn: Callable[..., Any] = fetch,
         broker_factory: Callable[[], BrokerClient] | None = None,
         keep_on_failure: bool = False,
@@ -289,6 +300,7 @@ class JobRunner:
         self.broker_socket = broker_socket
         self.extract_fn = extract_fn
         self.validate_fn = validate_fn
+        self.provision_fn = provision_fn
         self.fetch_fn = fetch_fn
         self.keep_on_failure = keep_on_failure
         self.hold_s = hold_s
@@ -418,6 +430,7 @@ class JobRunner:
         *,
         check_id: str | None = None,
         bundle_sha256: str | None = None,
+        harness: bool = False,
     ) -> str:
         conn = connect(self.db_path)
         try:
@@ -457,6 +470,9 @@ class JobRunner:
                 cve_url=cve_url,
                 check_id=check_id,
                 bundle_sha256=bundle_sha256,
+                # Recorded, not acted on: this slice only makes the route
+                # selectable and visible, so the run itself is unchanged.
+                kind="harness_job" if harness else "job",
             )
         finally:
             conn.close()
@@ -1527,6 +1543,196 @@ class JobRunner:
                     "kernel_modules_sha256": _artifact_sha("kernel-modules-6.17.0-23"),
                 }
 
+            # ONE BUILDER FOR READINESS PARAMETERS, called by the reviewed
+            # provisioning path and by the harness path beside it. It was
+            # inline in readiness_step, which is defined AFTER the provision
+            # step runs - so a harness branch could not reuse it and would have
+            # rebuilt this three-way conditional from scratch. Two copies of
+            # "what readiness is asked" is how two paths start disagreeing
+            # about what a ready target even is.
+            def readiness_params() -> dict[str, Any]:
+                assert target is not None
+                if ecosystem_env is not None:
+                    return {
+                        "ports": " ".join(str(port) for port in target.target_ports),
+                        # The version to expect is read from the pinned lockfile
+                        # inside the guest, not passed in: npm resolves, so what
+                        # the lab declared need not survive. Only the name travels.
+                        "package": target.subject_package,
+                    }
+                if derived_facts is None:
+                    return {}
+                package = derived_release.package if derived_release is not None else ""
+                # The CVE id, so readiness can ask the installed package's own
+                # changelog whether it already carries this fix - the backported
+                # case no version check can see.
+                common = {
+                    "package": package,
+                    "expected_version": target.expected_version,
+                    "cve_id": target.cve_ids[0] if target.cve_ids else "",
+                }
+                if target.poc_context == "local":
+                    # No ports: nothing listens for a local PoC, and
+                    # readiness-local checks the evidence channel is shut to
+                    # this actor instead.
+                    return common
+                return {
+                    "ports": " ".join(str(port) for port in target.target_ports),
+                    **common,
+                }
+
+            def harness_provision() -> dict[str, Any]:
+                """A model builds the target; a rebuild decides whether it worked.
+
+                Nothing it does by hand reaches the measured machine: the
+                verification reverts to a snapshot taken before it touched
+                anything, runs only its digest-checked script, compares the
+                result against the state it explored, and only then asks
+                readiness. ADR 0003.
+                """
+                assert client is not None and target is not None and target_vm is not None
+                if self.provision_fn is None:
+                    raise RunnerFailure(
+                        "harness_error", "harness mode needs a provisioner model"
+                    )
+                layer = harness.ToolLayer(
+                    call_broker=client.call,
+                    job_id=job_id,
+                    target_vm_id=target_vm,
+                    record=lambda verb, sent: session_event(
+                        conn, job_id, "tool_call", {"verb": verb, "params": sent}
+                    ),
+                )
+
+                def run(command: str) -> str:
+                    result = layer.call("free_exec_target", {"command": command})
+                    return str(result.get("stdout") or "")
+
+                # Taken before the model touches anything, so every verification
+                # starts from a machine with no history.
+                # "disk", not a name of my own: the broker allows exactly
+                # {"disk", "memory"} and answered "invalid snapshot kind" to
+                # an invented "harness-clean" on the first live run. Disk is
+                # the right one anyway - the revert wants the base image's
+                # filesystem, not a RAM image of a machine mid-exploration.
+                snapshot = client.call("snapshot", {"vm_id": target_vm, "kind": "disk"})
+                reference = harness.capture(run)
+
+                def check_ready(payload: dict[str, Any]) -> harness.Verification:
+                    assert client is not None and target is not None
+                    script = self.data_dir / "jobs" / job_id / "out" / "provision.sh"
+                    if not script.is_file():
+                        return harness.Verification(
+                            False,
+                            "no_script",
+                            "nothing was copied out under the name provision.sh",
+                        )
+                    # Hashed here and checked again in the broker: the digest
+                    # recorded is the digest executed, so a script regenerated
+                    # between the declaration and the run refuses.
+                    digest = hashlib.sha256(script.read_bytes()).hexdigest()
+                    declared = str(payload.get("declared_version") or "")
+                    verdict = harness.verify(
+                        revert=lambda: client.call(
+                            "restore",
+                            {
+                                "vm_id": target_vm,
+                                "snapshot_id": snapshot["snapshot_id"],
+                            },
+                        ),
+                        run_script=lambda: client.call(
+                            "exec",
+                            {
+                                "vm_id": target_vm,
+                                "step_id": "provision-generated",
+                                "script_sha256": digest,
+                                "timeout_s": target.timeouts.provision_s,
+                            },
+                        ),
+                        run=run,
+                        readiness=lambda: client.call(
+                            "exec",
+                            {
+                                "vm_id": target_vm,
+                                "step_id": target.readiness_step_id,
+                                # The one builder both paths use. A from-source
+                                # build has no package database to ask, so the
+                                # version the model DECLARED is what readiness
+                                # verifies by running the binary.
+                                "params": {
+                                    **readiness_params(),
+                                    **({"expected_version": declared} if declared else {}),
+                                },
+                                "tty": False,
+                                "timeout_s": target.timeouts.readiness_s,
+                            },
+                        ),
+                        reference=reference,
+                    )
+                    session_event(
+                        conn,
+                        job_id,
+                        "readiness",
+                        {
+                            "passed": verdict.passed,
+                            "reason_code": verdict.reason_code,
+                            "detail": verdict.detail[:4000],
+                        },
+                    )
+                    return verdict
+
+                prompt = harness.prompt_for(derived_facts, HARNESS_READINESS_CALLS)
+                prompt_path = attempt_dir / "provision.prompt.txt"
+                prompt_path.write_text(prompt, encoding="utf-8")
+                record_artifact(
+                    conn,
+                    job_id=job_id,
+                    attempt_id=attempt_id,
+                    kind="llm_provision_prompt",
+                    path=prompt_path,
+                    sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                    size=len(prompt.encode("utf-8")),
+                )
+                outcome = harness.run_session(
+                    self.provision_fn(prompt, layer.call),
+                    check_ready,
+                    lambda: cve_artifact.text[:20000],
+                    max_readiness=HARNESS_READINESS_CALLS,
+                )
+                session_event(
+                    conn,
+                    job_id,
+                    "declaration",
+                    {
+                        "declaration": outcome.outcome,
+                        "reason_code": outcome.reason_code,
+                        "summary": outcome.detail[:4000],
+                    },
+                )
+                if outcome.outcome != "ready":
+                    # The give-up reasoning is the whole value of a failed
+                    # harness run, and _detail truncates - so it is an
+                    # artifact, not only a step detail.
+                    gave_up = attempt_dir / "provision-gave-up.txt"
+                    body = f"{outcome.reason_code}\n\n{outcome.detail}"
+                    gave_up.write_text(body, encoding="utf-8")
+                    record_artifact(
+                        conn,
+                        job_id=job_id,
+                        attempt_id=attempt_id,
+                        kind="evidence",
+                        path=gave_up,
+                        sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                        size=len(body.encode("utf-8")),
+                    )
+                    raise RunnerFailure(
+                        "provision_failed", outcome.detail or outcome.reason_code
+                    )
+                return {
+                    "readiness_calls": outcome.readiness_calls,
+                    "script_sha256": outcome.payload.get("script"),
+                }
+
             def setup_step() -> dict[str, Any]:
                 assert client is not None and target is not None and target_vm is not None
                 result = client.call(
@@ -1572,6 +1778,9 @@ class JobRunner:
             # hold that ordering. Provisioning also runs before any nonce is
             # placed, so no nonce value can appear in this trace.
             commands_path = attempt_dir / "provision-commands.txt"
+            # Harness mode replaces the provisioning step and nothing else:
+            # the same position, the same seq, a different way of getting there.
+            harnessed = str((get_job(conn, job_id) or {}).get("kind")) == "harness_job"
             try:
                 self._step(
                     conn,
@@ -1579,8 +1788,8 @@ class JobRunner:
                     attempt_id,
                     6 + app_staged,
                     "provision",
-                    target.setup_step_id,
-                    setup_step,
+                    "provision-generated" if harnessed else target.setup_step_id,
+                    harness_provision if harnessed else setup_step,
                 )
             finally:
                 if target_vm:
@@ -1626,51 +1835,7 @@ class JobRunner:
                     {
                         "vm_id": target_vm,
                         "step_id": target.readiness_step_id,
-                        "params": (
-                            {
-                                "ports": " ".join(
-                                    str(port) for port in target.target_ports
-                                ),
-                                # The version to expect is read from the pinned
-                                # lockfile inside the guest, not passed in: npm
-                                # resolves, so what the lab declared need not
-                                # survive. Only the name travels.
-                                "package": target.subject_package,
-                            }
-                            if ecosystem_env is not None
-                            else {
-                                # No ports: nothing listens for a local PoC,
-                                # and readiness-local checks the evidence
-                                # channel is shut to this actor instead.
-                                "package": (
-                                    derived_release.package
-                                    if derived_release is not None
-                                    else ""
-                                ),
-                                "expected_version": target.expected_version,
-                                # The CVE id, so readiness can ask the
-                                # installed package's own changelog whether it
-                                # already carries this fix - the backported
-                                # case no version check can see.
-                                "cve_id": target.cve_ids[0] if target.cve_ids else "",
-                            }
-                            if derived_facts is not None
-                            and target.poc_context == "local"
-                            else {
-                                "ports": " ".join(
-                                    str(port) for port in target.target_ports
-                                ),
-                                "package": (
-                                    derived_release.package
-                                    if derived_release is not None
-                                    else ""
-                                ),
-                                "expected_version": target.expected_version,
-                                "cve_id": target.cve_ids[0] if target.cve_ids else "",
-                            }
-                            if derived_facts is not None
-                            else {}
-                        ),
+                        "params": readiness_params(),
                         "tty": False,
                         "timeout_s": target.timeouts.readiness_s,
                     },

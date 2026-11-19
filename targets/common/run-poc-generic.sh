@@ -66,5 +66,24 @@ if [ -n "${poc_args// /}" ]; then
 else
   argv=("$target_ip" "$port" "$nonce_path")
 fi
+# SAY WHETHER THE TARGET IS EVEN REACHABLE, BEFORE BLAMING THE PoC.
+#
+# A PoC that cannot connect usually prints nothing and exits non-zero, so the
+# step's whole detail becomes the invoking line and nothing else. That is what
+# CVE-2021-41773 did here, twice, after eighteen steps had passed - and the
+# first thing anyone needs to know is whether the port was open from THIS
+# machine, which only this machine can answer.
+#
+# Three seconds, bounded, no dependency on curl or nc being installed.
+if timeout 3 bash -c "exec 3<>/dev/tcp/$target_ip/$port" 2>/dev/null; then
+  echo "reachable: $target_ip:$port accepted a connection from here" >&2
+else
+  echo "UNREACHABLE: $target_ip:$port refused or dropped from here." >&2
+  echo "  The PoC is about to run anyway, but if it prints nothing this is" >&2
+  echo "  why. Check the attacker's route to the target and the forward" >&2
+  echo "  rules for the locked phase - the two guests are on separate" >&2
+  echo "  bridges, so their traffic is routed and filtered, not switched." >&2
+  ip route get "$target_ip" 2>&1 | head -1 | sed 's/^/  route: /' >&2 || true
+fi
 printf 'invoking: %s %s' "./$entrypoint" "${argv[*]}" >&2; echo >&2
 exec "${runner[@]}" "./$entrypoint" "${argv[@]}"

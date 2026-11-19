@@ -1,0 +1,139 @@
+#!/usr/sbin/nft -f
+# The mirror VM's own filter (ADR 0002).
+#
+# This is the SECOND of two layers and not the boundary. Root inside this VM
+# can flush this ruleset, which is why the host also drops everything arriving
+# from this VM's address. What this layer buys is the accident: an upstream
+# redirect, or a crafted reply, that steers a mirror at 192.168.137.10 is
+# stopped here, where the mistake would be made, instead of becoming a packet
+# the host has to refuse.
+#
+# TWO THINGS THIS GETS RIGHT THAT THE FIRST VERSION DID NOT.
+#
+# 1. established,related comes FIRST in output. In stage 1 this VM has one
+#    NIC on 10.44.0.0/24 and the guests it serves are on 10.42.0.0/16, routed
+#    by the host - so every reply a mirror sends is addressed into a private
+#    range, out of the only interface there is. Put the private drop first and
+#    no mirror can answer anyone. Exactly the ordering bug the host-side rules
+#    have a test for, in the other place it can happen.
+#
+# 2. No interface is named. The first version said oifname "enp1s0", which was
+#    a guess about PCI slots; a rule naming an interface that does not exist
+#    matches nothing and silently filters nothing. Conntrack and destination
+#    are enough here, and they are the same whatever the NIC is called.
+#
+# Stage 2 adds a NIC per job network. When it does, this file needs revisiting
+# so that private traffic is scoped to the right interfaces rather than to
+# conntrack state alone.
+
+flush ruleset
+
+table inet xentry_mirror {
+  chain output {
+    type filter hook output priority 0; policy accept;
+
+    # SSH REPLIES, STATED WITHOUT CONDITIONS, AND FIRST.
+    #
+    # Loading this file is what loads nf_conntrack, so the ssh session that is
+    # loading it is NOT in the conntrack table yet: `ct state established`
+    # does not match it, the packet falls through to the drops below, and the
+    # session hangs - silently, because a drop is not a refusal. That is
+    # exactly what happened on the first attempt.
+    #
+    # sshd's own replies therefore get a rule that asks nothing of conntrack.
+    tcp sport 22 accept
+
+    # Answers to guests and to upstream archives. Must precede every drop:
+    # a reply to 10.42.0.x is a private destination.
+    ct state established,related accept
+
+    oif "lo" accept
+
+    # DHCP renewal, which is unicast to the server once the lease is held.
+    # This VM's address is pinned by libvirt rather than configured statically,
+    # because the static route through cloud-init required renaming the NIC and
+    # that left the VM answering nothing at all.
+    udp dport 67 accept
+
+    # The host itself, named first so a reader need not work out that it falls
+    # inside the ranges below. Beyond DHCP above, this VM has no business
+    # addressing it.
+    # THE JOB SUBNETS ARE NOT "PRIVATE ADDRESSES THIS VM MUST NOT REACH".
+    # They are the subnets it exists to serve, and 10.43.x sits inside the
+    # 10.0.0.0/8 drop below - so dnsmasq's OFFER to 10.43.1.10, and every
+    # other packet this VM starts towards a guest, was dropped on the way out.
+    #
+    # It never showed up as a mirror failure because a guest-initiated TCP
+    # connection is covered by `ct state established` above; only traffic the
+    # VM ITSELF starts - a DHCP reply to a broadcast - had no state to match.
+    ip daddr { 10.43.1.0/24, 10.43.2.0/24 } accept
+    ip daddr 255.255.255.255 accept
+
+    ip daddr 10.44.0.1 drop
+
+    # Every private destination, for a NEW connection. The mirrors answer;
+    # they never call a guest, and nothing here may call the operator's LAN.
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } drop
+
+    accept
+  }
+
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    iif "lo" accept
+
+    # Replies from the archives this VM fetches from.
+    ct state established,related accept
+
+    # SSH: THIS HOST AND NOBODY ELSE.
+    #
+    # Port 22 here is the broker's jumphost - every guest command is tunnelled
+    # through it. A guest able to reach it could ask it to forward to anything
+    # this VM can reach, which is the whole internet, and could work on the
+    # key's authentication at its leisure. This said `tcp dport 22 accept`
+    # with no source at all, and the blanket 10.43.0.0/16 rule under it
+    # reached every other port as well.
+    #
+    # 10.44.0.1 is this host on xentrywan0, the source address the broker's
+    # own connections carry. Nothing on the LAN can reach here either: the wan
+    # network is libvirt NAT, which forwards nothing inbound.
+    #
+    # This also keeps the dead-man property the unconditional rule had: it
+    # matches on SOURCE, not on conntrack state, so the session that loads
+    # this ruleset survives loading it - which matters because loading
+    # nftables loads nf_conntrack, and that session is not yet tracked.
+    ip saddr 10.44.0.1 accept
+
+    # The guests get DHCP, DNS and the mirrors. NEVER 22, and nothing else
+    # this VM happens to be listening on.
+    #
+    # 8081-8086 is the whole mirror range: 8081 artifacts, 8082 apt,
+    # 8083 registry, 8084 the attacker's apt, 8086 oci. Whether they answer
+    # AT THIS MOMENT is the phase table's decision at priority -10, which
+    # drops all tcp from these subnets while the PoC runs. This rule only
+    # declines to stand in its way, because an accept in one table does not
+    # survive a drop in another.
+    # DHCP, WHICH NO VERSION OF THIS FILE HAS EVER ALLOWED.
+    #
+    # A DISCOVER is  saddr 0.0.0.0 -> daddr 255.255.255.255, udp 68 -> 67.
+    # It has no source address yet - that is the entire point of asking - so
+    # it matched neither the rule below nor the `ip saddr 10.43.0.0/16 accept`
+    # that preceded it, and the chain's policy drop ate it.
+    #
+    # Seven DISCOVERs from 52:54:00:00:00:10 arrived on ens3 and were dropped
+    # here, while dnsmasq sat on 0.0.0.0:67 with both ranges loaded. Every
+    # create_target and stage_approved failure since the cutover was this.
+    #
+    # Matched by PORT PAIR, not by source: sport 68 dport 67 is a client
+    # talking to a server, which is the only thing that can arrive this way.
+    udp sport 68 udp dport 67 accept
+
+    ip saddr { 10.43.1.0/24, 10.43.2.0/24 } udp dport { 53, 67 } accept
+    ip saddr { 10.43.1.0/24, 10.43.2.0/24 } tcp dport 8081-8086 accept
+
+    # A guest pinging its own gateway is ordinary diagnosis and discloses
+    # nothing; refusing it would cost a confusing failure later.
+    ip saddr { 10.43.1.0/24, 10.43.2.0/24 } icmp type echo-request accept
+  }
+}

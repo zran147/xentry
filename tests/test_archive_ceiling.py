@@ -678,3 +678,432 @@ def test_a_ref_field_that_is_not_a_list_is_repaired() -> None:
         assert coerce_facts({key: []}, [])[key] == []
         # A list of two stays a list of two.
         assert len(coerce_facts({key: [ref, ref]}, [])[key]) == 2
+
+
+def test_every_provider_call_asks_for_a_json_object() -> None:
+    """All three call sites, or the one left out fails the way flash did.
+
+    deepseek-chat answered with bare JSON, so nothing forced the point. On
+    deepseek-flash the extractor reasoned in the content stream instead -
+    "We need answer JSON only. Need extract facts. Let's parse." - spent
+    35,297 characters doing it, was cut off at "Let's final.", and never
+    emitted an object. The brace slice then matched braces inside the prose
+    and reported "invalid JSON", blaming syntax for a reply with no JSON in
+    it at all.
+
+    deepseek-chat is no longer offered on the account, so there is no going
+    back to the model that happened not to need this.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "src/xentry"
+    for name in ("extract.py", "validator.py", "extract_adk.py"):
+        text = (root / name).read_text()
+        assert "JSON_ONLY" in text, name
+
+    from xentry.extract import JSON_ONLY
+
+    assert JSON_ONLY["response_format"] == {"type": "json_object"}
+    assert int(JSON_ONLY["max_tokens"]) >= 4096
+
+
+def test_a_failed_parse_says_why_the_provider_stopped() -> None:
+    """The old message cost a transcript dig to learn the reply was prose.
+
+    "extractor returned invalid JSON" is true and useless. finish_reason
+    plus the reply's size distinguishes the three real cases: truncated mid
+    reasoning (length), a complete answer in the wrong shape (stop), and a
+    reply that is empty.
+    """
+    import pytest
+
+    from xentry.extract import ExtractorError, _parse_json
+
+    prose = "We need answer JSON only. Let's parse. " * 900 + 'then {"a": } oops'
+    with pytest.raises(ExtractorError) as caught:
+        _parse_json(prose, "length")
+    message = str(caught.value)
+    assert "finish_reason=length" in message
+    assert str(len(prose.strip())) in message
+
+    # No braces at all is the other branch, and it must say why too.
+    with pytest.raises(ExtractorError) as caught:
+        _parse_json("I think, therefore I am.", "stop")
+    assert "finish_reason=stop" in str(caught.value)
+
+    # An unknown reason still reads as a sentence rather than an empty gap.
+    with pytest.raises(ExtractorError) as caught:
+        _parse_json("no object here", "")
+    assert "finish_reason=unknown" in str(caught.value)
+
+
+def test_a_refusal_offers_the_model_s_own_reply() -> None:
+    """A check id in a failure must be reachable from the page that shows it.
+
+    Every refusal carries the id of the check it came from, and that id is a
+    directory holding the exact prompt and the exact reply. Reading it meant
+    curl against /api/checks/<id>/log by hand, so
+
+        validator_error [c7b13dfb...]: extractor returned invalid JSON
+        [finish_reason=unknown, 9417 chars of reply]
+
+    was the end of the road from the page that reported it - while the 9,417
+    characters, a reasoning model talking itself through the extraction and
+    stopping at "Final JSON." without writing any, sat on disk unread.
+
+    A reasoning reply is evidence in its own right: it says what the model
+    understood the task to be, which separates a wrong answer from a misread
+    question.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "src/xentry/web"
+    js = (root / "static/app.js").read_text()
+    css = (root / "static/style.css").read_text()
+
+    # setMessage is the single funnel every refusal passes through, which is
+    # why the offer is wired there and not at each call site.
+    body = js[js.index("function setMessage") : js.index("/* ------------------------------------------- what")]
+    assert "offerTheReply(element, text)" in body
+
+    # Fetches the endpoint that already exists; no new route was needed.
+    assert "/api/checks/${id}/log" in js
+    # Falls back to a panel of its own, because the job page has no #plan.
+    assert 'getElementById("model-reply")' in js
+    # The size is shown, since an empty reply and a 9,417-character one that
+    # holds no JSON are different failures.
+    assert "characters)" in js
+    assert ".linklike" in css
+
+
+def test_both_provider_paths_report_the_stop_reason_and_the_spend() -> None:
+    """finish_reason=unknown was the ADK path discarding what it knew.
+
+    The event carries finish_reason AND usage_metadata, and the extractor
+    passed neither to the parser, so a reply cut off at max_tokens and a model
+    that chose to stop read identically.
+
+    thoughts_token_count is the number that settles it: DeepSeek charges
+    hidden reasoning against the same ceiling as the visible answer, so a
+    ~2,500-token reply that ended at "Final JSON." was either the model
+    finishing or ~5,700 reasoning tokens pushing the total into the cap.
+    Nothing else distinguishes those.
+    """
+    import types
+
+    from xentry.extract import _why
+
+    adk = (root_text := __import__("pathlib").Path(__file__).resolve().parents[1]
+           / "src/xentry/extract_adk.py").read_text()
+    assert "_parse_json(text, why)" in adk, root_text
+    assert "usage_metadata" in adk
+    assert "thoughts_token_count" in adk
+    assert "candidates_token_count" in adk
+
+    # The litellm helper reports the reason and the completion tokens, and
+    # survives a response object that carries neither.
+    full = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(finish_reason="length")],
+        usage=types.SimpleNamespace(completion_tokens=32768),
+    )
+    assert _why(full) == "length, 32768 tokens"
+    bare = types.SimpleNamespace(choices=[types.SimpleNamespace(finish_reason=None)])
+    assert _why(bare) == "unknown, ? tokens"
+
+
+def test_the_answer_is_read_from_the_answer_part() -> None:
+    """parts[0] is the model's THINKING on a reasoning model, not its answer.
+
+    ADK converts a provider's reasoning payload into Part(thought=True) and
+    places it before the answer. The extractor read parts[0], so every
+    extraction on deepseek-flash parsed 11,754 characters of the model
+    reasoning about sudo CVE-2025-32463 - ending "Write JSON." - and never
+    looked at the part holding the JSON it then wrote.
+
+    deepseek-chat emitted no thought part, which is the only reason this held
+    up until the account's models changed.
+    """
+    import pathlib
+
+    adk = (
+        pathlib.Path(__file__).resolve().parents[1] / "src/xentry/extract_adk.py"
+    ).read_text()
+
+    # The answer excludes thought parts, and joins the rest - an answer split
+    # across two parts was being half-read even without reasoning.
+    assert 'if not getattr(p, "thought", False)' in adk
+    assert 'if getattr(p, "thought", False)' in adk
+    code = "\n".join(
+        line for line in adk.splitlines() if not line.strip().startswith("#")
+    )
+    assert "parts[0]" not in code, "the first part is not the answer"
+    # And the thinking is kept rather than dropped.
+    assert 'transcript.record("extract.reasoning", prompt, mind)' in adk
+
+
+def test_the_reasoning_stage_can_be_stored_and_shown() -> None:
+    """A new stage needs the artifacts CHECK, or it vanishes silently.
+
+    transcript.record() swallows a failing sink by design, so without the
+    migration the reasoning would be written to disk with no row to find it
+    by. The stage name must also carry no underscore: the audit page splits
+    llm_<stage>_<part> on "_" and requires exactly three fields.
+    """
+    import pathlib
+    import sqlite3
+
+    from xentry import db
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    conn = sqlite3.connect(":memory:")
+    version = db.migrate(conn, root / "migrations")
+    assert version >= 8
+    schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='artifacts'"
+    ).fetchone()[0]
+    for kind in ("llm_reasoning_prompt", "llm_reasoning_response"):
+        assert kind in schema, kind
+        assert len(kind.split("_")) == 3, kind
+
+    # Older kinds must survive the rebuild.
+    for kind in ("llm_extract_response", "llm_pocgen_prompt", "held_vms"):
+        assert kind in schema, kind
+
+    # The job page's rendered details offer the reply too.
+    js = (root / "src/xentry/web/static/app.js").read_text()
+    assert "wireRenderedDetails()" in js
+    assert "pre.cmdtext" in js
+
+
+def test_the_thinking_is_reachable_from_the_job_page(tmp_path) -> None:
+    """A link that says what it opens, and a stage the audit page can render.
+
+    "Audit bundle" gave no hint that the model's own words were inside it, so
+    on a job that SUCCEEDED - no failed step, no check id, no button - the
+    reasoning the verdict rests on was unreachable from the page showing the
+    verdict.
+
+    This also pins the kind-to-stage mapping: _llm_calls splits
+    llm_<stage>_<part> on "_" and requires exactly three fields, so the stage
+    name must stay underscore-free or the whole block is silently skipped.
+    """
+    import hashlib
+    import pathlib
+
+    from xentry.web.app import _llm_calls
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "src/xentry/web"
+
+    job = (root / "templates/job.html").read_text()
+    # The extra button is gone: "Audit bundle" was already the way in, and a
+    # second link to the same page is noise.
+    assert "Model reply" not in job
+    assert "/jobs/{{ job.id }}/audit" in job
+
+    audit = (root / "templates/audit.html").read_text()
+    assert 'id="model-calls"' in audit
+    # This asserted "the model's own thinking" against the raw template, which
+    # a Jinja comment satisfies while the page shows nothing - and that is
+    # exactly what happened when the blurb was removed. The caret is a
+    # structural claim that a comment cannot fake; the rendered page is
+    # covered by test_audit_ui.py.
+    # A caret inside the stage it belongs to, not a block of its own.
+    assert "<summary>Reasoning" in audit
+    assert '{% for call in llm if not call.stage.endswith(".reasoning") %}' in audit
+
+    # The chain the runner writes: files on disk, rows naming them, and the
+    # stage the audit page derives from the kind. The dot in the stage name is
+    # load-bearing - _llm_calls splits the kind on "_" and requires exactly
+    # three fields, so validate_reasoning would be skipped in silence while
+    # validate.reasoning splits correctly.
+    llm = tmp_path / "llm"
+    llm.mkdir()
+    thinking = "The nonce appears in the real run and not the control run."
+    artifacts = []
+    for stage, part, body in (
+        ("validate", "prompt", "the question"),
+        ("validate", "response", '{"verdict": "reproduced"}'),
+        ("validate.reasoning", "response", thinking),
+    ):
+        path = llm / f"{stage}.{part}.txt"
+        path.write_text(body)
+        artifacts.append(
+            {
+                "kind": f"llm_{stage}_{part}",
+                "name": path.name,
+                "sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "bytes": len(body.encode()),
+            }
+        )
+        assert len(f"llm_{stage}_{part}".split("_")) == 3
+
+    stages = {call["stage"]: call for call in _llm_calls(artifacts, tmp_path)}
+    assert "validate.reasoning" in stages, stages
+    assert stages["validate.reasoning"]["response"] == thinking
+    assert stages["validate.reasoning"]["response_bytes"] == len(thinking.encode())
+
+
+def test_nothing_said_about_a_card_is_written_outside_it() -> None:
+    """A card's status belongs in the card, not in the page-wide strip.
+
+    Three messages described a card from the top of the page:
+
+        Destroyed - the job finished as completed.
+        Release requested - waiting for the VMs to be destroyed.
+        Destroyed - the VMs and the subnet are gone.
+
+    and a fourth, the four-minute timeout, did the same while the card it was
+    about was still on screen. The held card already carries a .release-state
+    span for exactly this; the rebuilt card gets one made for it.
+    """
+    import pathlib
+    import re
+
+    js = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src/xentry/web/static/app.js"
+    ).read_text()
+
+    # No setMessage may talk about VMs, releasing, destroying or teardown.
+    about_cards = re.compile(r"destroy|release|\bvms\b|teardown|subnet", re.IGNORECASE)
+    for match in re.finditer(r"setMessage\(\s*(`[^`]*`|\"[^\"]*\")", js):
+        text = match.group(1)
+        line = js[: match.start()].count("\n") + 1
+        assert not about_cards.search(text), f"line {line}: {text}"
+
+    # The one helper that writes into a card, used by all three paths.
+    assert "function cardState(card, text, isError = false)" in js
+    assert js.count("cardState(card") >= 4
+    assert 'slot.className = "muted release-state"' in js
+
+
+def test_the_audit_page_says_where_the_extraction_went() -> None:
+    """There is no extract stage under a job, and the page must say why.
+
+    runner.py reuses the facts the check stored rather than re-reading the
+    same bytes - a second reading can produce a different plan than the one
+    the operator approved, which is how job f062e5c1 refused CVE-2021-41773
+    at step 2 on byte-identical artifacts. So validate is the only model call
+    that happens during a job, and an audit page showing only validate looks
+    like the extractor was never recorded.
+
+    It was: under the check, reachable by the id the job row keeps.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "src/xentry/web"
+    audit = (root / "templates/audit.html").read_text()
+    js = (root / "static/app.js").read_text()
+
+    assert 'data-check="{{ job.check_id }}"' in audit
+    assert "data-check-stages" in audit
+    # Guarded, because a job submitted without a check has no transcript there.
+    assert "{% if job.check_id %}" in audit
+
+    # Rendered in the SAME shape the template gives the job's own calls, so
+    # the extraction does not look like a different kind of thing for having
+    # happened at a different time.
+    assert 'querySelectorAll("[data-check-stages]")' in js
+    assert "function stageBlock(stage, prompt, response, reasoning)" in js
+    for piece in ('className = "mono"', 'createElement("details")',
+                  'className = "plan"', '"Question"', '"Response"'):
+        assert piece in js, piece
+    # NO facts list any more. With no sha256 to show it held nothing but the
+    # two lengths, directly above two carets that now carry them - the same
+    # number twice, and the copy nobody reads while deciding whether to open a
+    # transcript.
+    assert 'className = "facts"' not in js
+    # No sha256 is claimed: a check's transcript has no artifact row to verify
+    # against, unlike the job's own calls.
+    block = js[js.index("function stageBlock") : js.index("async function renderCheckStages")]
+    # Stripped, or this matches the comment explaining why there is no hash -
+    # the same mistake as three other checks in this file's history.
+    code = "\n".join(
+        line for line in block.splitlines() if not line.strip().startswith("//")
+    )
+    assert "sha256" not in code
+    assert "characters" in code
+    # And the length sits beside EVERY caret, not only Reasoning: the size was
+    # appended under `if (label === "Reasoning")`, so the extract and validate
+    # carets showed nothing.
+    assert 'if (label === "Reasoning")' not in code
+    assert "summary.append(size)" in code
+    # An empty reply says so rather than reading "0 characters".
+    assert r'" \u00b7 empty"' in code
+
+
+def test_retry_this_job_re_extracts_rather_than_reusing_facts() -> None:
+    """Retry carries the two links and nothing else.
+
+    The facts a check stores are reused by the job submitted WITH that
+    check_id - that is the whole point, since a second reading of the same
+    bytes can produce a different plan than the one the operator approved.
+    But a retry is a new submission: it fills the URL fields, leaves both
+    stage gates closed, and the operator checks the links again, which runs a
+    new extraction under a new check id.
+
+    A check is single use and expires, so there is no way for a retry to
+    silently inherit one.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "src/xentry/web"
+    js = (root / "static/app.js").read_text()
+    job = (root / "templates/job.html").read_text()
+
+    # The link carries only cve, poc and from.
+    assert "?cve={{ links.cve_text|urlencode }}" in job
+    assert "from={{ job.id }}" in job
+    assert "check_id" not in job
+
+    prefill = js[js.index("function prefillFromQuery") : js.index("function renderChannels")]
+    # from is used for the message only - never to skip a check.
+    assert 'params.get("from")' in prefill
+    assert "check_id" not in prefill
+    assert "/api/jobs" not in prefill
+    # And the form's gates are not advanced here.
+    assert "submitButton.disabled = false" not in prefill
+
+
+def test_the_verdict_keeps_its_own_reasoning() -> None:
+    """validate showed an answer with no account of how it was reached.
+
+    The extractor's thinking was already kept, because ADK hands it back as a
+    separate thought part. The validator runs on the litellm path, where
+    DeepSeek returns it in message.reasoning_content - a field nothing in this
+    codebase read. A verdict is the one call whose reasoning a reader most
+    needs, and it was the one being dropped.
+
+    Both are now recorded as "<stage>.reasoning" so the page can show each as
+    a caret inside the stage it belongs to.
+    """
+    import pathlib
+    import sqlite3
+
+    from xentry import db
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    validator = (root / "src/xentry/validator.py").read_text()
+    adk = (root / "src/xentry/extract_adk.py").read_text()
+
+    assert 'getattr(response.choices[0].message, "reasoning_content", "")' in validator
+    assert 'transcript.record("validate.reasoning", prompt, mind)' in validator
+    assert 'transcript.record("extract.reasoning", prompt, mind)' in adk
+    # The old standalone stage name is gone from both.
+    assert 'transcript.record("reasoning"' not in validator
+    assert 'transcript.record("reasoning"' not in adk
+
+    conn = sqlite3.connect(":memory:")
+    assert db.migrate(conn, root / "migrations") >= 9
+    schema = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='artifacts'"
+    ).fetchone()[0]
+    for kind in (
+        "llm_extract.reasoning_response",
+        "llm_validate.reasoning_response",
+        # Kept: jobs run between 008 and 009 have rows naming these, and the
+        # copy would fail on a kind already in the table.
+        "llm_reasoning_response",
+    ):
+        assert kind in schema, kind
+        assert len(kind.split("_")) == 3, kind

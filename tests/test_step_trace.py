@@ -9,8 +9,13 @@ from pathlib import Path
 import pytest
 
 from broker.runtime import GUEST_TRACE_DIR, GUEST_TRACE_REL, step_command
+from xentry.db import MIGRATIONS
 from xentry.runner import JobRunner, _JobLocal
 from xentry.web.app import _provision_plan, _step_commands
+
+# Read from disk, not written down: a new migration used to break tests
+# that only wanted "the newest one".
+LATEST_MIGRATION = max(int(p.name.split("_", 1)[0]) for p in MIGRATIONS.glob("*.sql"))
 
 
 def test_command_enables_the_trace_and_quotes_arguments() -> None:
@@ -769,7 +774,10 @@ def test_the_detail_column_arrives_with_migration_004(tmp_path: Path) -> None:
         conn.close()
     upgraded = init_db(db_path, migrations_dir=migrations)
     try:
-        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert (
+            upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+            == LATEST_MIGRATION
+        )
         # ADD COLUMN, so rows written before the migration simply read NULL.
         assert upgraded.execute("SELECT detail FROM job_steps").fetchall() == []
     finally:

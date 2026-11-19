@@ -8,11 +8,11 @@ Type=simple
 User=root
 Group=xentry
 Environment=PYTHONDONTWRITEBYTECODE=1
-WorkingDirectory=/opt/xentry-broker
+WorkingDirectory=/opt/xentry
 RuntimeDirectory=xentry
 RuntimeDirectoryMode=0750
 EnvironmentFile=-/etc/xentry/broker.env
-ExecStart=/opt/xentry-broker/.venv/bin/python -m broker.main
+ExecStart=/opt/xentry/.venv-broker/bin/python -m broker.main
 Restart=on-failure
 NoNewPrivileges=yes
 PrivateTmp=yes

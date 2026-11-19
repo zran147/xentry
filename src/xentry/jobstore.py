@@ -94,6 +94,39 @@ def _job_event(conn: sqlite3.Connection, job_id: str, event_type: str, payload: 
         _event(conn, str(row["id"]), event_type, payload)
 
 
+# The harness session's one public door (ADR 0003). `_event` is private and
+# takes an attempt id; a model loop holds a job id, and it must not reach
+# `events.append` by hand either - coming through here is what keeps every
+# record in the attempt's chain. The chain IS the point: a reader can verify
+# that the recorded sequence of commands is the sequence that ran and that
+# nothing was spliced out, which is what makes a root shell in the exploratory
+# VM affordable at all.
+#
+# A closed set rather than a free string, because the live feed draws by kind:
+# a typo would be written into the journal and then render as nothing. The five
+# are what ADR 0003 says the record must hold - what the model thought, what it
+# ran, what came back, what readiness answered, and how it ended.
+#
+#   reasoning     the model's own words. {"text": ...}
+#   tool_call     one mediated verb. {"verb": ..., "params": {...}}; the UI
+#                 reads `verb`, and free_exec is drawn unlike anything else
+#                 (ADR 0004: "a card where the two verbs look alike is a card
+#                 that hides the only thing worth noticing").
+#   tool_result   {"verb", "status", "sha256", "body"} - a digest of the whole
+#                 output beside a truncated body, so the journal stays readable
+#                 while the digest still pins what was actually returned.
+#   readiness     one verdict from the code-owned check. {"passed": bool, ...}
+#   declaration   XENTRY_READY or XENTRY_GIVE_UP: {"declaration": "ready" |
+#                 "give_up", ...}, and an advisory request rides here too.
+SESSION_KINDS = frozenset({"reasoning", "tool_call", "tool_result", "readiness", "declaration"})
+
+
+def session_event(conn: sqlite3.Connection, job_id: str, kind: str, payload: dict[str, Any]) -> None:
+    if kind not in SESSION_KINDS:
+        raise ValueError(f"not a session event kind: {kind}")
+    _job_event(conn, job_id, f"session_{kind}", payload)
+
+
 def set_plan(
     conn: sqlite3.Connection,
     job_id: str,
@@ -355,22 +388,50 @@ def record_artifact(
     return artifact_id
 
 
+# A held job's outcome is still NULL: the runner finishes its steps, keeps the
+# VMs up and WAITS for a release, so there is a window - often a long one -
+# where every step has passed and the page says "running". That reads as work
+# in progress when nothing is progressing.
+HELD_EXISTS = (
+    "EXISTS(SELECT 1 FROM artifacts a WHERE a.job_id=j.id AND a.kind='held_vms')"
+    " AS has_held"
+)
+
+# Both routes to the same claim. 'experiment' is hidden from the job list and
+# the in-flight count deliberately; a harness job must NOT be, because it
+# holds a real VM - uncounted, two of them could run at once with neither
+# visible. One fragment, so the next query to filter by kind cannot forget.
+JOB_KINDS = "j.kind IN ('job','harness_job')"
+
+
 def _project_job(row: sqlite3.Row) -> dict[str, Any]:
     job = dict(row)
-    job["state"] = job.get("outcome") or ("running" if job.get("started_at") else "queued")
+    # Popped, so the flag does not leak into the API as a second source of
+    # truth about the same thing.
+    held = job.pop("has_held", 0)
+    job["state"] = (
+        "held"
+        if held and not job.get("outcome")
+        else job.get("outcome") or ("running" if job.get("started_at") else "queued")
+    )
     return job
 
 
 def get_job(conn: sqlite3.Connection, job_id: str) -> dict[str, Any] | None:
-    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = conn.execute(
+        f"SELECT j.*, {HELD_EXISTS} FROM jobs j WHERE j.id=?", (job_id,)
+    ).fetchone()
     return _project_job(row) if row is not None else None
 
 
 def list_jobs(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
-    # Jobs only. A rebuilt environment has no outcome by design and would
+    # Jobs only, by either route. A rebuilt environment has no outcome by
+    # design and would
     # otherwise sit here looking like a run that never finished.
     rows = conn.execute(
-        "SELECT * FROM jobs WHERE kind='job' ORDER BY created_at DESC LIMIT ?", (limit,)
+        f"SELECT j.*, {HELD_EXISTS} FROM jobs j WHERE {JOB_KINDS} "
+        "ORDER BY j.created_at DESC LIMIT ?",
+        (limit,),
     ).fetchall()
     return [_project_job(row) for row in rows]
 
@@ -396,7 +457,7 @@ def list_experiments(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str
 def count_live_jobs(conn: sqlite3.Connection) -> int:
     """Real jobs with no outcome yet, which is what blocks a restart."""
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM jobs WHERE kind='job' AND outcome IS NULL"
+        f"SELECT COUNT(*) AS n FROM jobs j WHERE {JOB_KINDS} AND j.outcome IS NULL"
     ).fetchone()
     return int(row["n"] if row is not None else 0)
 
@@ -416,8 +477,12 @@ def list_validations(conn: sqlite3.Connection, job_id: str) -> list[dict[str, An
 
 
 def list_artifacts(conn: sqlite3.Connection, job_id: str) -> list[dict[str, Any]]:
+    # path comes back so a caller can name the file: six different files are
+    # recorded under kind='evidence', and the kind alone cannot tell the
+    # provision transcript from the advisory page. The job page shows the base
+    # name only, the way bundle.py does.
     rows = conn.execute(
-        "SELECT id, attempt_id, kind, sha256, bytes FROM artifacts "
+        "SELECT id, attempt_id, kind, path, sha256, bytes FROM artifacts "
         "WHERE job_id=? ORDER BY rowid",
         (job_id,),
     ).fetchall()
@@ -549,11 +614,20 @@ def list_held_jobs(
 ) -> list[dict[str, Any]]:
     # Held by kind, so the experimental page shows its own VMs and the Running
     # VMs page never mixes an unpinned experiment in with the jobs.
+    #
+    # THE THIRD kind='job' FILTER, and the one that mattered. The Running VMs
+    # page calls this with the default, and it drives the release button and
+    # the login details - so a held harness job's VM would be up, costing
+    # memory, with no way to release it from the UI. "job" therefore means
+    # both kinds here, the way it does in list_jobs and count_live_jobs; an
+    # explicit kind= still asks for exactly that one, which is what keeps the
+    # experiment page showing only experiments.
+    kinds = ("job", "harness_job") if kind == "job" else (kind,)
     rows = conn.execute(
         "SELECT DISTINCT j.* FROM jobs j JOIN artifacts a ON a.job_id=j.id "
-        "WHERE j.kind=? AND j.outcome IS NULL AND a.kind='held_vms' "
-        "ORDER BY j.created_at DESC",
-        (kind,),
+        f"WHERE j.kind IN ({','.join('?' * len(kinds))}) AND j.outcome IS NULL "
+        "AND a.kind='held_vms' ORDER BY j.created_at DESC",
+        kinds,
     ).fetchall()
     return [_project_job(row) for row in rows]
 

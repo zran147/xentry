@@ -1,0 +1,109 @@
+{#- ONE TABLE, TWO PAGES.
+
+    The job page's Evidence card and the audit page's Artifacts card list the
+    same rows from the same table, and they had drifted into two different
+    renderings with two different vocabularies - one saying "Advisory page, as
+    fetched" and the other just "evidence". Both now come from here, so a new
+    artifact kind is described once.
+
+    LABELS. A row that reads "evidence" names nothing: the runner records six
+    different files under that one kind. The map is keyed on the file name each
+    record_artifact() call in runner.py actually writes, so a kind and a name
+    together say what the bytes are; anything unknown falls back to its kind
+    rather than to an invented description.
+
+    THE FORMAT IS SNIFFED, NOT ASSUMED. cve.html holds the CVE API's JSON
+    record - the name is a historical lie, which evidence_media() exists to
+    see through. So the label carries the detected format where the caller has
+    it, and claims nothing where it does not. That is why this row used to
+    read "Advisory page, as fetched" above a JSON document. -#}
+
+{#- SHORT ENOUGH TO STAY ON ONE LINE. These read as sentences once -
+    "Provisioning inputs: image, subnet, mirrors, pins" - and a label that
+    wraps makes its row taller than every other row in the table. The detail
+    after the colon was always recoverable from the file beside it and from
+    the bytes themselves, so it is gone and the column is uniform. -#}
+{%- set evidence_labels = {
+  "cve.html": "Advisory record",
+  "poc.html": "PoC page",
+  "citations-dropped.txt": "Citations dropped",
+  "criteria.json": "Success criteria",
+  "provision-inputs.json": "Provisioning inputs",
+  "provision-commands.txt": "Provision transcript",
+  "real_actor-commands.txt": "PoC run transcript",
+  "setup.sh": "Setup script",
+  "app-source.tar.gz": "Application source",
+  "poc-generic.tar.gz": "PoC archive",
+  "held-vms.json": "Held VM record",
+} %}
+{%- set kind_labels = {
+  "evidence": "Recorded evidence",
+  "poc": "PoC bytes",
+  "package": "Operator-approved package",
+  "setup_script": "Setup script",
+  "held_vms": "Held VM record",
+} %}
+{%- set format_names = {"json": "JSON", "html": "HTML"} %}
+
+{#- TWO SHAPES, ONE NAME. The job page passes rows from list_artifacts(),
+    which carry an absolute `path`. The audit bundle pops that key and stores
+    the base name as `name` (bundle.py: artifact["name"] = Path(...).name), so
+    reading only `path` left every audit row with no file name - and therefore
+    no label but its kind, which is how that card came to read "Recorded
+    evidence" five times over. -#}
+{%- macro filename(artifact) -%}
+{{ artifact.get("name") or (artifact.get("path") or "").split("/") | last }}
+{%- endmacro -%}
+
+{%- macro describe(artifact, media_kind="") -%}
+{%- set name = filename(artifact) -%}
+{%- set base = evidence_labels.get(name)
+    or ("Model-authored exploit" if name.startswith("exploit-")
+        else kind_labels.get(artifact.kind, artifact.kind)) -%}
+{%- set shown = format_names.get(media_kind) -%}
+{{ base }}{% if shown %} ({{ shown }}){% endif %}
+{%- endmacro -%}
+
+{#- A table, not a list: five facts per row read as columns and not as a
+    sentence, and the actions line up instead of hiding at the end of a
+    label. VIEW is the plain href, which serves the bytes as their own source
+    and never executes them. RENDER is offered only for html, because
+    ?view=render answers 409 for anything else - a button that cannot work
+    should not be drawn. -#}
+{%- macro table(job_id, artifacts, media={}, skip_prefix="", empty="") -%}
+<table class="evidence">
+  <thead>
+    <tr>
+      <th>What it is</th><th>File</th><th>Size</th><th>sha256</th>
+      <th class="actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {#- Filtered on a PREFIX, not a list of kinds, so a stage added later is
+        left out without an edit here. The job page uses it to drop llm_*,
+        which the audit page renders in full with its hashes and reasoning. -#}
+    {%- for artifact in artifacts
+        if not (skip_prefix and artifact.kind.startswith(skip_prefix)) %}
+    {%- set href = "/api/jobs/" ~ job_id ~ "/evidence/" ~ artifact.id %}
+    {%- set name = filename(artifact) %}
+    {%- set media_kind = media.get(artifact.id, "") %}
+    <tr>
+      <td class="what" title="{{ artifact.kind }} &middot; {{ name or "no path" }}">{{ describe(artifact, media_kind) }}</td>
+      <td class="mono muted">{{ name or artifact.kind }}</td>
+      <td class="num">{{ "{:,}".format(artifact.bytes or 0) }} B</td>
+      <td class="mono muted">{{ (artifact.sha256 or "-")[:16] }}</td>
+      <td class="actions">
+        <a class="button secondary" href="{{ href }}">View</a>
+        {%- if media_kind == "html" %}
+        <a class="button secondary" href="{{ href }}?view=render">Rendered</a>
+        {%- endif %}
+        <a class="button secondary" href="{{ href }}?view=download"
+           download="{{ name or artifact.kind }}">Download</a>
+      </td>
+    </tr>
+    {%- else %}
+    <tr><td colspan="5" class="muted">{{ empty or "Nothing recorded yet." }}</td></tr>
+    {%- endfor %}
+  </tbody>
+</table>
+{%- endmacro -%}

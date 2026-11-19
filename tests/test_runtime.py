@@ -148,6 +148,12 @@ def make_runtime(
         mirror_port=mirror_port,
         start_apt_proxy=start_apt_proxy,
         apt_port=apt_port,
+        # proxy_ip="" selects the LEGACY host-side path. Production cannot:
+        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # so no environment value re-enables this. These tests cover code
+        # that is now unreachable from the real entry point, and they are
+        # what will be deleted along with it.
+        proxy_ip="",
     )
     return runtime, virsh, nft, image
 
@@ -182,6 +188,12 @@ def test_image_hash_is_verified(tmp_path: Path) -> None:
         apply_nft=False,
         virsh=FakeVirsh(),
         nft=FakeNft(),
+        # proxy_ip="" selects the LEGACY host-side path. Production cannot:
+        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # so no environment value re-enables this. These tests cover code
+        # that is now unreachable from the real entry point, and they are
+        # what will be deleted along with it.
+        proxy_ip="",
     )
     with pytest.raises(BrokerError) as exc:
         fresh._image_path("ubuntu-24.04-target")
@@ -577,6 +589,12 @@ def test_the_catalog_is_re_read_when_it_changes(tmp_path: Path) -> None:
         data_dir=tmp_path,
         image_dir=images,
         catalog_path=catalog,
+        # proxy_ip="" selects the LEGACY host-side path. Production cannot:
+        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # so no environment value re-enables this. These tests cover code
+        # that is now unreachable from the real entry point, and they are
+        # what will be deleted along with it.
+        proxy_ip="",
     )
     assert runtime._catalog_data()["ubuntu-generic-image"]["status"] == "pending"
 
@@ -613,7 +631,13 @@ def test_ping_says_which_proxies_this_process_started(tmp_path: Path) -> None:
     from broker.runtime import BrokerRuntime
 
     runtime = BrokerRuntime(
-        data_dir=tmp_path, image_dir=tmp_path / "images", start_oci_mirror=True
+        data_dir=tmp_path, image_dir=tmp_path / "images", start_oci_mirror=True,
+        # proxy_ip="" selects the LEGACY host-side path. Production cannot:
+        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # so no environment value re-enables this. These tests cover code
+        # that is now unreachable from the real entry point, and they are
+        # what will be deleted along with it.
+        proxy_ip="",
     )
     answer = runtime.ping()
     assert answer["pong"] is True

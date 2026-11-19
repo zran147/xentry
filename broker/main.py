@@ -52,7 +52,29 @@ VERB_PARAMS: dict[str, frozenset[str]] = {
     "lock_network": frozenset({"job_id", "target_ports"}),
     "create_target": frozenset({"job_id", "target_id", "image_id"}),
     "create_attacker": frozenset({"job_id", "profile_id", "image_id"}),
-    "exec": frozenset({"vm_id", "step_id", "params", "tty", "timeout_s", "trace"}),
+    "exec": frozenset(
+        {"vm_id", "step_id", "params", "tty", "timeout_s", "trace", "script_sha256"}
+    ),
+    # THE VERBS THAT RUN WHAT THEY ARE GIVEN (ADR 0004). No `user`: root only,
+    # because provisioning needs root and a second identity is surface for
+    # nothing. No path, no shell selection, no step id.
+    #
+    # AND NO vm_id. The role is in the VERB NAME and the machine is resolved
+    # from the job - jobs_root/<job>/<role>/state.json - so a caller cannot
+    # address the wrong VM, which is why neither of these has a role check to
+    # get wrong. A check is a thing that can be forgotten in a refactor; a
+    # parameter that does not exist cannot be passed wrongly.
+    #
+    # free_exec_attacker is declared now and offered to nobody: the explore
+    # phase's allowlist carries only the target one. It is not in NEVER,
+    # because a later phase legitimately wants it.
+    #
+    # `exec` is untouched and keeps refusing {argv, command, shell, user} in its
+    # step params with "raw command rejected". These are separate doors, not a
+    # widening of that one, which is why the rename to restricted_exec was
+    # dropped: every broker_calls row ever written says exec and still means it.
+    "free_exec_target": frozenset({"job_id", "command", "timeout_s"}),
+    "free_exec_attacker": frozenset({"job_id", "command", "timeout_s"}),
     "cancel_exec": frozenset({"vm_id", "request_id"}),
     "copy_in": frozenset({"vm_id", "artifact_id", "guest_path"}),
     "stage_artifact": frozenset({"job_id", "artifact_id", "path", "sha256"}),
@@ -165,6 +187,14 @@ def _create_attacker(params: dict[str, Any]) -> dict[str, Any]:
         "profile_id": resolve_profile(_text(params, "profile_id")),
         "image_id": resolve_image(_text(params, "image_id")),
     }
+
+
+def _free_exec(params: dict[str, Any]) -> dict[str, Any]:
+    # Runtime-only, like every verb that touches a guest. The table still needs
+    # the entry: test_the_verb_tables_agree asserts HANDLERS and VERB_PARAMS are
+    # the same set, because broker/registry.py keeping its own allowlist is how
+    # every derived job once died with "unknown step id: setup-generic".
+    raise BrokerError("broker_registry_rejected", "a free command needs a runtime")
 
 
 def _exec(params: dict[str, Any]) -> dict[str, Any]:
@@ -355,6 +385,8 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "create_target": _create_target,
     "create_attacker": _create_attacker,
     "exec": _exec,
+    "free_exec_target": _free_exec,
+    "free_exec_attacker": _free_exec,
     "cancel_exec": _cancel_exec,
     "copy_in": _copy_in,
     "stage_artifact": _stage_artifact,
@@ -381,6 +413,8 @@ RUNTIME_VERBS = frozenset(
         "create_target",
         "create_attacker",
         "exec",
+        "free_exec_target",
+        "free_exec_attacker",
         "place_nonce",
         "copy_in",
         "stage_artifact",
@@ -586,7 +620,7 @@ def _allowed_uids() -> set[int]:
 
 
 def main() -> int:
-    from broker.runtime import BrokerRuntime
+    from broker.runtime import PROXY_VM_BRIDGE, PROXY_VM_IP, BrokerRuntime
 
     socket_path = Path(os.environ.get("XENTRY_BROKER_SOCKET", "/run/xentry/broker.sock"))
     data_dir = Path(os.environ.get("XENTRY_DATA_DIR", "/var/lib/xentry"))
@@ -602,6 +636,11 @@ def main() -> int:
                 "/var/lib/xentry/artifacts/manifest.json",
             )
         ),
+        # `or` the default, not just a default: an EMPTY value in the env file
+        # used to mean "run the mirrors on the host", which is the path ADR
+        # 0002 exists to remove. There is no longer a value that re-enables it.
+        wan_bridge=os.environ.get("XENTRY_WAN_BRIDGE") or PROXY_VM_BRIDGE,
+        proxy_ip=os.environ.get("XENTRY_PROXY_IP") or PROXY_VM_IP,
         start_mirror=os.environ.get("XENTRY_START_MIRROR", "1") != "0",
         # Off by default: it is reachable from a guest during provisioning, so
         # it is opted into per deployment rather than assumed.

@@ -161,6 +161,42 @@ def _command(raw: str, table: dict[re.Pattern[str], str], kind: str) -> tuple[st
     )
 
 
+# CAN THIS BE GENERALISED BEYOND npm? YES, AND ONLY FOUR PLACES ARE npm.
+#
+# The shape here is not about Node. It is: the vulnerable package is a
+# DEPENDENCY of some host application, the lab reproduces through that
+# application, and a control run reinstalls the closure at the fixed version
+# to show the finding moves with it. That applies to pip, composer, cargo, go
+# and maven without a change of idea.
+#
+# What is npm-specific is narrow:
+#
+#   read_app()        parses package.json - dependencies and scripts.start
+#   declared_version()walks that manifest's dependency map
+#   manifest_url()    builds a raw URL to package.json inside the PoC repo
+#   _command()        maps a start command to the port it listens on
+#
+# What is already ecosystem-agnostic:
+#
+#   subject_for()     which package the control moves, read from the app
+#   fixed_for()       the fixed version to move it to, from facts
+#   control_port_for()the second port the control serves on
+#   closure_id()      a digest of the resolved dependency set
+#   derive()          everything after Environment is in hand
+#
+# The serving side is general already: RegistryProxy carries pypi, npm and
+# nodejs ecosystems with their own filters and one cutoff rule.
+#
+# So generalising means an Environment READER per ecosystem - a small
+# interface returning {dependencies, start command, port} - and leaving the
+# selection logic alone. It is not done here because exactly one CVE has
+# needed it (CVE-2026-126187, react reproduced through next), and a second
+# reader written against no second example would encode this one's accidents:
+# the subject-is-not-the-product rule was only discoverable BECAUSE a real
+# advisory named react while the tree carried next. A pip case would tell us
+# whether `extras` and environment markers belong in the interface, and
+# guessing that now is how the closure id ends up meaning different things in
+# different ecosystems.
 def read_app(package_json: str) -> Environment:
     """Validate one lab's package.json into an Environment, or refuse.
 

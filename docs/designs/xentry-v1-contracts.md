@@ -597,7 +597,7 @@ Naming: domain `xentry-<job_id>-target`, `xentry-<job_id>-attacker`; network `xe
 
 ## 12. Security and deployment ownership
 
-* Broker code, virtualenv, config, and unit are root-owned (`/opt/xentry-broker`, 0755/0700); the app has read-only access. The app venv is `xentry`-owned; the broker never executes app code.
+* Broker code, virtualenv, config, and unit are root-owned (`/opt/xentry`, 0755/0700); the app has read-only access. The app venv is `xentry`-owned; the broker never executes app code.
 * Job directories, overlays, ISOs, and evidence are `xentry:xentry`; the broker can write only under `/var/lib/xentry/jobs` and `/var/lib/xentry/mirror`.
 * `broker_calls` are written by the broker to `var/jobs/<job_id>/broker_calls.jsonl` (root-owned file, app-readable); the app indexes the returned call record into SQLite.
 * Broker unit: `User=root`, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/xentry`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN` (validated in Gate B), `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`.

@@ -19,6 +19,222 @@ function setMessage(text, isError = false) {
   if (!element) return;
   element.textContent = text;
   element.classList.toggle("error", isError);
+  offerTheReply(element, text);
+}
+
+/* ------------------------------------------- what the model actually said --- */
+
+// Every refusal names the check it came from - "[c7b13dfbbc184bf2b...]" - and
+// that id is a directory holding the exact prompt and the exact reply. Until
+// now reading it meant curl against /api/checks/<id>/log by hand, so this:
+//
+//   validator_error [c7b13dfb...]: extractor returned invalid JSON
+//   [finish_reason=unknown, 9417 chars of reply]
+//
+// was the end of the road from the page that reported it, while the 9,417
+// characters - a reasoning model talking itself through the extraction and
+// stopping at "Final JSON." without ever writing any - sat on disk unread.
+//
+// A reasoning reply IS evidence: it says what the model understood the task to
+// be, which is the difference between a wrong answer and a misread question.
+// BRACKETED, not any 32 hex characters. A refusal names its check as
+// "[c7b13dfb...]", but a path like
+//   /var/lib/xentry/jobs/7132a1d9835b4b268732247b72f73928/network.xml
+// also contains 32 hex characters - the JOB id - so the bare pattern offered
+// to show a transcript for a job and got "no transcript for that check".
+const CHECK_IN_TEXT = /\[([0-9a-f]{32})\]/;
+// A bare id is still valid when something hands one over deliberately, as
+// the audit page's data-check does.
+const CHECK_ID = /^[0-9a-f]{32}$/;
+
+function offerTheReply(element, text) {
+  const found = CHECK_IN_TEXT.exec(String(text || ""));
+  if (!found) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "linklike";
+  button.textContent = "show what the model answered";
+  button.addEventListener("click", () => showTheReply(found[1], button));
+  element.append(" ", button);
+}
+
+// The plan pre-block on the submit page, or one made next to the message when
+// there is none - the job page shows failures through setMessage too.
+function replyPanel(button) {
+  const plan = document.getElementById("plan");
+  if (plan) return plan;
+  let panel = document.getElementById("model-reply");
+  if (!panel) {
+    panel = document.createElement("pre");
+    panel.id = "model-reply";
+    panel.className = "plan";
+    button.parentElement?.after(panel);
+  }
+  return panel;
+}
+
+// The job page prints a failed step's detail from the template, not through
+// setMessage, so the offer has to be attached to what the server rendered:
+//
+//   <pre class="cmdtext">validator_error [b1f5d037...]: extractor returned
+//   invalid JSON [finish_reason=unknown, 11754 chars of reply]</pre>
+//
+// Same button, same endpoint. A job page shows the stage transcripts under
+// "Audit bundle" as well, but that is a page away and lists the job's own
+// calls - this is the reply that the failure in front of you came from.
+function wireRenderedDetails() {
+  const seen = new Set();
+  document.querySelectorAll("pre.cmdtext").forEach((block) => {
+    const found = CHECK_IN_TEXT.exec(block.textContent || "");
+    if (!found || seen.has(found[1])) return;
+    seen.add(found[1]);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "linklike";
+    button.textContent = "show what the model answered";
+    button.addEventListener("click", () => showTheReply(found[1], button));
+    const holder = document.createElement("p");
+    holder.className = "muted";
+    holder.append(button);
+    block.after(holder);
+  });
+  // The audit page names the check the extraction ran under. Its stages render
+  // in the same shape the template gives the job's own calls - heading, sizes,
+  // Question, Response - because "the same thing, somewhere else" should not
+  // look like a different kind of thing.
+  document.querySelectorAll("[data-check-stages]").forEach((holder) => {
+    const id = holder.dataset.check;
+    if (id && CHECK_ID.test(id)) renderCheckStages(holder, id);
+  });
+}
+
+// One stage block, built to match audit.html's loop exactly.
+function stageBlock(stage, prompt, response, reasoning) {
+  const frag = document.createDocumentFragment();
+  const head = document.createElement("h3");
+  head.className = "mono";
+  head.id = `stage-${stage}`;
+  head.textContent = stage;
+  const aside = document.createElement("span");
+  aside.className = "muted";
+  aside.textContent = " - ran at check time";
+  head.append(aside);
+  frag.append(head);
+
+  // NO FACTS LIST HERE. A check's transcript is files on disk with no artifact
+  // row, so there is no sha256 to show - which left this list holding nothing
+  // but the two lengths, directly above two carets that now carry them. The
+  // same number twice, once in a place nobody reads while deciding whether to
+  // open a transcript.
+  // Question, Response, then Reasoning - a caret inside the stage it belongs
+  // to. It was briefly its own block with its own question and answer, which
+  // made one model call read as two unrelated things.
+  const boxes = [["Question", prompt], ["Response", response]];
+  if (reasoning) boxes.push(["Reasoning", reasoning]);
+  for (const [label, text] of boxes) {
+    const box = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    // Every one of them, not just Reasoning. The point of a closed caret is
+    // to say whether opening it is worth it, and a reply holding nothing
+    // should be distinguishable from one holding 11,754 characters without
+    // clicking. "characters" rather than "bytes" because this path measures a
+    // JS string from a file on disk, not a recorded artifact's byte count.
+    const size = document.createElement("span");
+    size.className = "muted";
+    size.textContent = text ? ` \u00b7 ${text.length} characters` : " \u00b7 empty";
+    summary.append(size);
+    const pre = document.createElement("pre");
+    pre.className = "plan";
+    pre.textContent = text || "[not captured]";
+    box.append(summary, pre);
+    frag.append(box);
+  }
+  return frag;
+}
+
+async function renderCheckStages(holder, id) {
+  const note = holder.querySelector("p");
+  try {
+    const log = await api(`/api/checks/${id}/log`);
+    const items = log.items || {};
+    // "extract.response.txt"           -> stage extract, part response
+    // "extract.reasoning.response.txt"  -> stage extract, its reasoning
+    //
+    // The part is always the last field, so the stage is everything before
+    // it - which is what lets a stage name carry a dot.
+    const stages = new Map();
+    for (const [name, text] of Object.entries(items)) {
+      const bits = name.replace(/\.txt$/, "").split(".");
+      const part = bits.pop();
+      const stage = bits.join(".");
+      if (!stage || !part) continue;
+      const mind = stage.endsWith(".reasoning");
+      const base = mind ? stage.slice(0, -".reasoning".length) : stage;
+      const entry = stages.get(base) || { prompt: "", response: "", reasoning: "" };
+      if (!mind) entry[part] = text;
+      else if (part === "response") entry.reasoning = text;
+      stages.set(base, entry);
+    }
+    if (!stages.size) {
+      if (note) note.textContent = `Check ${id.slice(0, 12)} recorded nothing.`;
+      return;
+    }
+    if (note) {
+      note.textContent =
+        `Ran when the links were checked, before this job existed, under check ${id.slice(0, 12)}.` +
+        " A job reuses the facts its check stored rather than extracting again," +
+        " so these calls belong to the check, not to the job.";
+    }
+    for (const stage of [...stages.keys()].sort()) {
+      const { prompt, response, reasoning } = stages.get(stage);
+      holder.append(stageBlock(stage, prompt, response, reasoning));
+    }
+  } catch (error) {
+    if (note) note.textContent = `Could not load check ${id.slice(0, 12)}: ${error.message}`;
+  }
+}
+
+async function showTheReply(id, button) {
+  button.disabled = true;
+  const was = button.textContent;
+  button.textContent = "loading the transcript...";
+  try {
+    const log = await api(`/api/checks/${id}/log`);
+    const items = log.items || {};
+    const names = Object.keys(items).sort();
+    const panel = replyPanel(button);
+    panel.textContent = names.length
+      ? names
+          .map((name) => {
+            const body = items[name] || "";
+            // The byte count matters: a 9,417-character "reply" that holds no
+            // JSON is a different failure from an empty one, and the heading
+            // is where a reader sees which they have.
+            // "reasoning.response.txt" is the model's thinking, which ADK
+            // hands back as a separate thought part; "extract.response.txt"
+            // is the answer it then gave. Naming both beats guessing.
+            return `=== ${name}  (${body.length} characters)\n\n${body}`;
+          })
+          .join("\n\n\n")
+      : "Nothing was recorded for that check.";
+    panel.hidden = false;
+    panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    button.textContent = `check ${id.slice(0, 12)} shown below`;
+  } catch (error) {
+    // The label is restored from what it was BEFORE this click, not from
+    // whatever the last failure left behind - appending to it produced
+    // "show what the model answered (failed: ...) (failed: ...)".
+    //
+    // A 404 means there is genuinely nothing filed under that id, so the
+    // offer is withdrawn rather than left inviting another click.
+    if (/no transcript/i.test(error.message || "")) {
+      button.remove();
+      return;
+    }
+    button.disabled = false;
+    button.textContent = `${was} (${error.message})`;
+  }
 }
 
 /* ---------------------------------------------------------------- time --- */
@@ -296,6 +512,7 @@ function wireSubmitPage() {
   if (!form) return;
   const cve = document.getElementById("cve-url");
   const poc = document.getElementById("poc-url");
+  const harness = document.getElementById("harness-switch");
   const checkButton = document.getElementById("check-button");
   const submitButton = document.getElementById("submit-button");
   const preflightButton = document.getElementById("preflight-button");
@@ -405,6 +622,10 @@ function wireSubmitPage() {
           cve_url: cve.value,
           poc_url: poc.value,
           check_id: checkId,
+          // Read at submit, not at check: the link check is the same work for
+          // both routes, so flipping the switch after checking must not need
+          // the links checked again.
+          harness: Boolean(harness && harness.checked),
         }),
       });
       clearExpiry();
@@ -567,6 +788,220 @@ function buildFailureDetail(step) {
   return detail;
 }
 
+/* ------------------------------------ the model's session, as it runs --- */
+
+// Harness mode only (ADR 0003). A harness job's provision row carries the
+// session the model is driving: what it thought, every tool call with its
+// parameters, what came back, each readiness verdict, and how it ended.
+//
+// The array is the feed and the DOM is a view of it. That is not a style
+// choice: renderSteps() rebuilds the whole steps table on every stream tick,
+// so a feed that lived only in the table would be thrown away each time the
+// runner touched a step. New records are appended to both - to the array
+// always, to the list when one is on the page.
+//
+// The records are served with their `hash` and `prev_hash`, and each line
+// carries them in its tooltip. The chain is the reason this card can be
+// believed: a reader can check that the sequence of commands shown is the
+// sequence that ran and that nothing was spliced out of it.
+let sessionEvents = [];
+let sessionCursor = 0;
+let sessionHarness = false;
+let sessionFeed = null;
+let sessionMeta = null;
+
+// Short, because the kind is a label beside the content rather than a heading.
+const SESSION_LABELS = {
+  reasoning: "thinking",
+  tool_call: "call",
+  tool_result: "result",
+  readiness: "readiness",
+  declaration: "declaration",
+};
+
+// The feed's state, read and written in one place. The route decides whether
+// there is a session to poll for at all, and the cursor is how far the reader
+// has been served. A function rather than bare assignment because these are
+// module-level `let`s: nothing outside this file can reach them otherwise, the
+// node tests included.
+function sessionState(patch) {
+  if (patch && "harness" in patch) sessionHarness = Boolean(patch.harness);
+  if (patch && "cursor" in patch) sessionCursor = Number(patch.cursor) || 0;
+  return { harness: sessionHarness, cursor: sessionCursor, count: sessionEvents.length };
+}
+
+function sessionKind(record) {
+  return String((record || {}).type || "").replace(/^session_/, "");
+}
+
+function sessionSpan(className, text) {
+  const span = document.createElement("span");
+  span.className = className;
+  // textContent everywhere in this card: every field below is either a model's
+  // output or a VM's, and ADR 0004 says both are untrusted data.
+  span.textContent = text;
+  return span;
+}
+
+// The one line of each record that is worth reading first.
+function sessionBody(kind, payload) {
+  if (kind === "tool_call") {
+    const params = payload.params && typeof payload.params === "object" ? payload.params : {};
+    // A command is the whole point of a free_exec, so it is shown as itself.
+    // Anything else shows its parameters without vm_id: the tool layer
+    // substitutes the job's own target VM there, so it is never news.
+    if (params.command !== undefined) return String(params.command);
+    const shown = { ...params };
+    delete shown.vm_id;
+    return JSON.stringify(shown);
+  }
+  if (kind === "tool_result") return String(payload.body === undefined ? "" : payload.body);
+  if (kind === "reasoning") return String(payload.text === undefined ? "" : payload.text);
+  if (kind === "readiness") return String(payload.detail || payload.summary || "");
+  if (kind === "declaration") {
+    return String(payload.summary || payload.what_was_missing || payload.script || "");
+  }
+  return JSON.stringify(payload);
+}
+
+// What sits to the right of the label: the small facts that say whether to
+// read the body.
+function sessionNote(kind, payload) {
+  const parts = [];
+  if (kind === "tool_result") {
+    if (payload.status !== undefined && payload.status !== null) parts.push(`${payload.status}`);
+    // A digest of the whole output, beside a body that is truncated. The
+    // digest is what pins what was returned; the body is what you read.
+    if (payload.sha256) parts.push(`sha256 ${String(payload.sha256).slice(0, 12)}`);
+    if (payload.truncated) parts.push("truncated");
+  }
+  if (kind === "readiness") {
+    parts.push(payload.passed ? "passed" : "failed");
+    if (payload.reason_code) parts.push(String(payload.reason_code));
+  }
+  if (kind === "declaration") {
+    if (payload.declaration) parts.push(String(payload.declaration));
+    if (payload.reason_code) parts.push(String(payload.reason_code));
+  }
+  return parts.join(" · ");
+}
+
+function sessionLine(record) {
+  const kind = sessionKind(record);
+  const payload =
+    record.payload && typeof record.payload === "object" ? record.payload : {};
+  const item = document.createElement("li");
+  item.className = `sessionline kind-${kind}`;
+  // The chain, where a reader can find it without the audit bundle.
+  item.title = `hash ${record.hash || "?"}\nprev ${record.prev_hash || "(first)"}`;
+
+  const head = document.createElement("div");
+  head.className = "sessionhead";
+  const ms = parseTs(record.ts);
+  if (ms !== null) head.appendChild(sessionSpan("sessionts", formatLocal(ms, "time")));
+  head.appendChild(sessionSpan("sessionkind", SESSION_LABELS[kind] || kind));
+
+  const verb = String(payload.verb || "");
+  if (verb) {
+    // free_exec is a logged root shell and exec is a digest-checked registered
+    // step. ADR 0004: "a card where the two verbs look alike is a card that
+    // hides the only thing worth noticing" - so the verb is a badge of its
+    // own, and data-verb is what the stylesheet colours it by.
+    const badge = sessionSpan("sessionverb", verb);
+    badge.dataset.verb = verb;
+    if (verb === "free_exec") badge.title = "a root shell in the target VM, recorded";
+    head.appendChild(badge);
+  }
+  const note = sessionNote(kind, payload);
+  if (note) head.appendChild(sessionSpan("sessionnote", note));
+
+  const body = sessionBody(kind, payload);
+  item.appendChild(head);
+  if (body) {
+    const text = document.createElement("pre");
+    // Reasoning is prose and a command is code; the class decides which font
+    // and which wrapping, so the two cannot be mistaken for each other.
+    text.className = kind === "reasoning" ? "sessiontext prose" : "sessiontext";
+    text.textContent = body;
+    item.appendChild(text);
+  }
+  return item;
+}
+
+function paintSessionMeta() {
+  if (!sessionMeta) return;
+  const count = sessionEvents.length;
+  sessionMeta.textContent = count
+    ? `hash-chained · ${count} event${count === 1 ? "" : "s"}`
+    : "hash-chained · waiting for the model's first call";
+}
+
+function appendSession(records) {
+  let added = 0;
+  for (const record of records || []) {
+    if (!sessionKind(record)) continue;
+    sessionEvents.push(record);
+    added += 1;
+    // Appended, not re-rendered: the reader may be part-way up a long session.
+    if (sessionFeed) sessionFeed.appendChild(sessionLine(record));
+  }
+  if (added) paintSessionMeta();
+  // Follow the tail only when the reader is already at it.
+  if (added && sessionFeed) {
+    const atEnd =
+      sessionFeed.scrollHeight - sessionFeed.scrollTop - sessionFeed.clientHeight < 40;
+    if (atEnd) sessionFeed.scrollTop = sessionFeed.scrollHeight;
+  }
+  return added;
+}
+
+// Rebuilt from the array on every stream tick, which is why the array exists.
+function buildSessionDetail(step) {
+  if (String(step.name || "") !== PROVISION_STEP) return null;
+  if (!sessionHarness && sessionEvents.length === 0) return null;
+  const detail = document.createElement("tr");
+  detail.className = "step-detail";
+  detail.dataset.detail = `session:${PROVISION_STEP}`;
+  const cell = document.createElement("td");
+  cell.colSpan = STEP_FIELDS.length;
+  const block = document.createElement("div");
+  block.className = "cmdblock";
+  const title = document.createElement("p");
+  title.className = "cmdblock-title";
+  title.appendChild(sessionSpan("name", "model session"));
+  sessionMeta = sessionSpan("meta", "");
+  sessionMeta.id = "session-meta";
+  title.appendChild(sessionMeta);
+  const list = document.createElement("ol");
+  list.className = "cmdlog sessionlog";
+  list.id = "session-feed";
+  for (const record of sessionEvents) list.appendChild(sessionLine(record));
+  sessionFeed = list;
+  paintSessionMeta();
+  block.appendChild(title);
+  block.appendChild(list);
+  cell.appendChild(block);
+  detail.appendChild(cell);
+  return detail;
+}
+
+// One request, one SELECT and one sequential read of the attempt's journal.
+// The cursor is an index into that whole journal, so it cannot replay a record
+// it has already been served and cannot skip one written in between.
+async function pollSession(jobId) {
+  try {
+    const data = await api(`/api/jobs/${jobId}/session?cursor=${sessionCursor}`);
+    const cursor = Number(data.cursor);
+    if (Number.isFinite(cursor) && cursor > sessionCursor) sessionCursor = cursor;
+    return appendSession(Array.isArray(data.items) ? data.items : []);
+  } catch {
+    // Left alone deliberately: the feed keeps what it has and the next tick
+    // retries. A failed poll is not news worth taking the page's status line
+    // for, and the progress bar already says when the stream is stale.
+    return 0;
+  }
+}
+
 // What each step does, in one place because the steps table is built twice:
 // the server renders it for a finished job, renderSteps rebuilds it while one
 // runs, and a description that lived in only one of them would appear and
@@ -676,6 +1111,14 @@ function renderSteps(tbody, steps) {
       row.appendChild(cell);
     }
     tbody.appendChild(row);
+    // Directly under the provision row, and before the command trace, in the
+    // same order the server renders them: the session is what a reader of a
+    // harness job came for.
+    const session = buildSessionDetail(step);
+    if (session) {
+      tbody.appendChild(session);
+      attachToggle(row, session, `session:${step.name}`);
+    }
     const commandDetail = buildCommandDetail(step);
     if (commandDetail) {
       tbody.appendChild(commandDetail);
@@ -749,6 +1192,17 @@ function wireJobPage() {
   const bar = progressRegion("job-progress");
   wireRenderedDetail();
 
+  // The session feed. The server renders the empty container for a harness
+  // job, so this picks it up rather than building it, and renderSteps rebuilds
+  // it from sessionEvents on every tick after that.
+  sessionState({ harness: data.dataset.kind === "harness_job" });
+  sessionFeed = document.getElementById("session-feed");
+  sessionMeta = document.getElementById("session-meta");
+  paintSessionMeta();
+  // One read for a job that has already finished: polling stops when the job
+  // ends, and the record is still worth seeing afterwards.
+  if (sessionHarness) pollSession(jobId);
+
   if (cancel) {
     cancel.addEventListener("click", async () => {
       setBusy(cancel, true);
@@ -771,6 +1225,12 @@ function wireJobPage() {
   // The server already streams {job, steps} on every change, so the page is
   // patched in place instead of polling or reloading mid-run.
   const events = new EventSource(`/api/jobs/${jobId}/events`);
+
+  // The session is polled rather than carried on that stream (ADR 0003): the
+  // endpoint is one SELECT and one sequential read, the feed only has to keep
+  // up with one model's calls, and a dropped poll costs nothing because the
+  // cursor is where the reader got to rather than where the stream was.
+  const sessionTimer = sessionHarness ? window.setInterval(() => pollSession(jobId), 2000) : 0;
 
   events.addEventListener("state", (event) => {
     let payload;
@@ -795,6 +1255,10 @@ function wireJobPage() {
 
     if (job.outcome) {
       events.close();
+      // Polling stops with the job. One last read first, for whatever the
+      // model emitted between the final tick and the outcome.
+      window.clearInterval(sessionTimer);
+      if (sessionHarness) pollSession(jobId);
       const failed = job.outcome !== "completed" && job.outcome !== "passed";
       if (failed) {
         bar?.fail(`Finished: ${job.outcome}`);
@@ -850,16 +1314,35 @@ function wireHeldVms() {
           method: "POST",
           body: "{}",
         });
-        setMessage("Release requested - waiting for the VMs to be destroyed.");
-        const label = card.querySelector(".release-state");
-        if (label) label.textContent = "destroying...";
+        // No page-wide message. The card has its own status slot, two lines
+        // down, and a sentence about THIS card rendered at the top of the page
+        // is a sentence about something the reader is not looking at.
+        cardState(card, "destroying - waiting for the VMs to be gone");
         awaitTeardown(card, button.dataset.job, button);
       } catch (error) {
-        setMessage(error.message, true);
+        // The failure belongs to this card as much as the progress does.
+        cardState(card, error.message, true);
         setBusy(button, false);
       }
     });
   }
+}
+
+// A card's status goes IN the card. vms.html gives the held card a
+// .release-state span for exactly this; the rebuilt card has none, so one is
+// made next to its button. Anything else ends up in the page-wide message
+// strip at the top, describing a card the reader is not looking at - which is
+// what "Release requested - waiting for the VMs to be destroyed." did.
+function cardState(card, text, isError = false) {
+  let slot = card.querySelector(".release-state");
+  if (!slot) {
+    slot = document.createElement("span");
+    slot.className = "muted release-state";
+    const row = card.querySelector(".row span") || card.querySelector(".row");
+    row?.prepend(slot);
+  }
+  slot.textContent = text;
+  slot.classList.toggle("error", isError);
 }
 
 /* ----------------------------------------------------------- copying --- */
@@ -1048,6 +1531,12 @@ function dropCard(card, emptyText) {
 // on click would claim a teardown that has not happened; polling until the job
 // has an outcome makes the card's disappearance mean what a reader assumes it
 // means.
+// "held" is reported for a job whose steps have passed while its VMs are
+// still up. The states that mean "nothing more will happen here" are the
+// outcomes; held is not one of them, which is why the teardown watcher
+// below keeps polling through it.
+const FINISHED = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
 async function awaitTeardown(card, jobId, button) {
   const label = card.querySelector(".release-state");
   for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -1072,10 +1561,10 @@ async function awaitTeardown(card, jobId, button) {
     if (label) label.textContent = "destroying...";
   }
   // Still held after four minutes: say so rather than leaving a stuck spinner.
-  setMessage(
-    "Release was requested but the VMs are still up after 4 minutes - reload to check.",
-    true,
-  );
+  // In the card, like every other thing said about a card - this was the last
+  // one writing to the page-wide strip, and the card is still on screen in
+  // exactly this case, so there is nowhere better for it to go.
+  cardState(card, "still up after 4 minutes - reload to check", true);
   if (button) setBusy(button, false);
 }
 
@@ -1094,10 +1583,12 @@ function wireEnvironments() {
         // destroy_environment() runs synchronously and only returns
         // {"destroyed": true} if it did not raise. So the card can go now -
         // the 200 is the backend confirmation, not a request for one.
-        setMessage("Destroyed - the VMs and the subnet are gone.");
+        // Same reason the release banner went: the card vanishing IS the
+        // signal, and this sentence described a card that was no longer on
+        // screen to be described.
         dropCard(card, "No rebuilt environments.");
       } catch (error) {
-        setMessage(error.message, true);
+        cardState(card, error.message, true);
         setBusy(button, false);
       }
     });
@@ -1115,4 +1606,5 @@ document.addEventListener("DOMContentLoaded", () => {
   wireRebuildForm();
   wireEnvironments();
   wireTimestamps();
+  wireRenderedDetails();
 });

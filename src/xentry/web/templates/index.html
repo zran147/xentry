@@ -13,6 +13,21 @@
     <input id="cve-url" name="cve_url" type="url" required placeholder="https://...">
     <label for="poc-url">PoC link</label>
     <input id="poc-url" name="poc_url" type="url" required placeholder="https://github.com/...">
+    {#- The route is chosen here rather than inferred from the links, because a
+        harness job and a fixed-script job do not prove the same thing and the
+        record has to say which one ran (ADR 0003). Unchecked by default: the
+        reviewed route stays the one you get without deciding. -#}
+    <div class="switchrow">
+      <input id="harness-switch" name="harness" type="checkbox" role="switch">
+      <label for="harness-switch">Harness mode
+        <span class="muted">- off for no harness, on for with harness</span>
+      </label>
+    </div>
+    <p class="muted">
+      With the harness on, a model builds the target itself instead of running
+      a reviewed provisioning script. The inputs are the same two links either
+      way; the switch chooses only the route.
+    </p>
     <div class="actions">
       <button id="check-button" type="button"><span class="spinner" hidden></span>Check links</button>
       <button id="submit-button" type="submit" disabled><span class="spinner" hidden></span>Start job</button>

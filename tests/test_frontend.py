@@ -20,6 +20,7 @@ HARNESS = JS_DIR / "render.js"
 WIRING = JS_DIR / "wiring.js"
 ENVIRONMENTS = JS_DIR / "environments.js"
 COPY = JS_DIR / "copy.js"
+SESSION = JS_DIR / "session.js"
 NODE = shutil.which("node")
 
 skip_without_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -65,6 +66,23 @@ def test_running_vms_page_requests_and_destroys_environments() -> None:
     # carry the CSRF header and name the job it was offered for.
     done = subprocess.run(
         [str(NODE), str(ENVIRONMENTS), str(APP_JS)],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=JS_DIR,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+@skip_without_node
+def test_the_session_feed_appends_and_tells_the_two_verbs_apart() -> None:
+    # Two things Python cannot see. The feed is rebuilt from an array on every
+    # stream tick, because renderSteps replaces the whole table and a feed
+    # held only in the DOM would be wiped mid-session; and ADR 0004 asks that
+    # free_exec never be drawn like exec, which is a property of the rendered
+    # line rather than of the endpoint.
+    done = subprocess.run(
+        [str(NODE), str(SESSION), str(APP_JS)],
         capture_output=True,
         text=True,
         check=False,

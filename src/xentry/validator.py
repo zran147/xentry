@@ -11,7 +11,7 @@ from typing import Any
 import litellm
 
 from xentry import transcript
-from xentry.extract import ExtractorError, _parse_json
+from xentry.extract import JSON_ONLY, ExtractorError, _parse_json, _why
 from xentry.models import LlmVerdict
 
 PROMPT_VERSION = "validator-v1"
@@ -147,14 +147,22 @@ def assess(facts: RunnerFacts, narrative: NarrativeBundle) -> tuple[LlmVerdict, 
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             timeout=120,
+            **JSON_ONLY,
         )
     except Exception as exc:
         transcript.record("validate", prompt, f"provider_unavailable: {exc}")
         raise ValidatorError("provider_unavailable", str(exc)) from exc
     content = (response.choices[0].message.content or "").strip()
     transcript.record("validate", prompt, content)
+    # The verdict's own thinking. On the litellm path DeepSeek returns it in
+    # message.reasoning_content, a field nothing in this codebase read - so
+    # the validate stage showed an answer with no account of how it was
+    # reached, while the extractor's thinking was already being kept. A
+    # verdict is the one call whose reasoning a reader most needs.
+    mind = getattr(response.choices[0].message, "reasoning_content", "") or ""
+    transcript.record("validate.reasoning", prompt, mind)
     try:
-        parsed: dict[str, Any] = _parse_json(content)
+        parsed: dict[str, Any] = _parse_json(content, _why(response))
     except ExtractorError as exc:
         raise ValidatorError("validator_error", str(exc)) from exc
     try:

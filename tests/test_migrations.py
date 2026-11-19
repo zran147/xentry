@@ -7,20 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from xentry.db import DatabaseError, init_db, migrate
+from xentry.db import MIGRATIONS, DatabaseError, init_db, migrate
+
+# The newest migration on disk. Hard-coding this number meant every
+# migration broke six unrelated tests, which teaches editing the
+# assertion instead of reading it.
+LATEST_MIGRATION = max(int(p.name.split("_", 1)[0]) for p in MIGRATIONS.glob("*.sql"))
 
 
 def test_migration_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "xentry.db"
     conn = init_db(db_path)
     try:
-        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
-        assert migrate(conn) == 7
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == LATEST_MIGRATION
+        assert migrate(conn) == LATEST_MIGRATION
     finally:
         conn.close()
     reopened = sqlite3.connect(db_path)
     try:
-        assert reopened.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert reopened.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == LATEST_MIGRATION
     finally:
         reopened.close()
 
@@ -99,7 +104,7 @@ def test_artifact_kinds_migration_preserves_rows(tmp_path: Path) -> None:
 
     upgraded = init_db(db_path, migrations_dir=migrations)
     try:
-        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == LATEST_MIGRATION
         row = upgraded.execute("SELECT * FROM artifacts WHERE id='art-1'").fetchone()
         assert row is not None
         assert row["kind"] == "evidence"
@@ -173,7 +178,7 @@ def test_setup_script_kind_requires_migration_003(tmp_path: Path) -> None:
 
     upgraded = init_db(db_path, migrations_dir=migrations)
     try:
-        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+        assert upgraded.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == LATEST_MIGRATION
         upgraded.execute(
             "INSERT INTO artifacts(id, job_id, attempt_id, kind, path, sha256, bytes) "
             "VALUES (?,?,?,?,?,?,?)",

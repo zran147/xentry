@@ -38,6 +38,31 @@ FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 MIN_QUOTE = 8
 MIN_QUOTE_WORDS = 2
 MAX_ARTIFACT_CHARS = 12_000
+# deepseek-chat answered with bare JSON. deepseek-flash reasons in the CONTENT
+# stream - "We need answer JSON only. Need extract facts. Let's parse." - and
+# on CVE-2025-32463 it spent 35,297 characters doing that, was cut off at
+# "Let's final.", and never emitted the object at all. The brace slice below
+# then matched braces inside the prose and died as "invalid JSON", which
+# blamed the reply's syntax for a reply that had no JSON in it.
+#
+# response_format makes the provider return an object or nothing; max_tokens
+# bounds the reply. Shared by all three call sites - the direct extractor, the
+# ADK extractor and the validator - because all three parse JSON out of the
+# same kind of answer.
+#
+# 8192 was the first value here and it may have made things WORSE. The reply
+# before this setting existed ran to 35,297 characters; with the cap it came
+# back at 9,417 - about 2,500 visible tokens, which is nowhere near 8,192
+# UNLESS the model's hidden reasoning tokens are also charged against the
+# ceiling, as DeepSeek's reasoning models charge them. Then 9,417 characters
+# of visible text sitting on top of ~5,700 invisible ones is exactly the cap,
+# and "Final JSON." is where we cut the model off mid-sentence.
+#
+# 32768 is above anything observed, so a reply that still stops short stopped
+# for its own reasons rather than ours. Which it was is only knowable from
+# finish_reason, and the ADK path - the one actually running - discards it;
+# that is why the failure said finish_reason=unknown.
+JSON_ONLY = {"response_format": {"type": "json_object"}, "max_tokens": 32768}
 
 
 class ExtractorError(RuntimeError):
@@ -325,8 +350,19 @@ def _prompt(artifacts: list[ArtifactText]) -> str:
     )
 
 
-def _parse_json(content: str) -> dict[str, Any]:
+# Why the provider stopped, for the failure message. A comment rather than a
+# docstring because the budget counts one and not the other, and this needed
+# the line back.
+def _why(response: Any) -> str:
+    return (f"{getattr(response.choices[0], 'finish_reason', '') or 'unknown'}, "
+            f"{getattr(getattr(response, 'usage', None), 'completion_tokens', '?')} tokens")
+
+
+def _parse_json(content: str, why: str = "") -> dict[str, Any]:
     raw = content.strip()
+    # "invalid JSON" alone sent me to the stored transcript to discover the
+    # reply was 35k characters of prose truncated mid-sentence. Say that here.
+    how = f" [finish_reason={why or 'unknown'}, {len(raw)} chars of reply]"
     fenced = FENCE_RE.search(raw)
     if fenced:
         raw = fenced.group(1).strip()
@@ -336,11 +372,13 @@ def _parse_json(content: str) -> dict[str, Any]:
         start = raw.find("{")
         end = raw.rfind("}")
         if start < 0 or end <= start:
-            raise ExtractorError("validator_error", "extractor returned no JSON object")
+            raise ExtractorError("validator_error", "extractor returned no JSON object" + how)
         try:
             parsed = json.loads(raw[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise ExtractorError("validator_error", "extractor returned invalid JSON") from exc
+            raise ExtractorError(
+                "validator_error", "extractor returned invalid JSON" + how
+            ) from exc
     if not isinstance(parsed, dict):
         raise ExtractorError("validator_error", "extractor result is not an object")
     if parsed.get("error"):
@@ -678,6 +716,7 @@ def direct_extract(artifacts: list[ArtifactText]) -> Facts:
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             timeout=120,
+            **JSON_ONLY,
         )
     except Exception as exc:
         transcript.record("extract", prompt, f"provider_unavailable: {exc}")
@@ -685,7 +724,7 @@ def direct_extract(artifacts: list[ArtifactText]) -> Facts:
     content = (response.choices[0].message.content or "").strip()
     # Captured before parsing, so a malformed reply stays inspectable.
     transcript.record("extract", prompt, content)
-    parsed = coerce_facts(_parse_json(content), artifacts)
+    parsed = coerce_facts(_parse_json(content, _why(response)), artifacts)
     try:
         facts = Facts.model_validate(parsed)
     except Exception as exc:

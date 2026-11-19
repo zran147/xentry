@@ -10,7 +10,7 @@ import re
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from starlette.responses import Response
 
-from xentry import archive, ecosystem, generic, release, sourcestore, transcript
+from xentry import archive, ecosystem, events, generic, harness, release, sourcestore, transcript
 from xentry.broker import BrokerClient, BrokerError
 from xentry.bundle import build_bundle
 from xentry.db import connect, init_db
@@ -95,6 +95,11 @@ class JobCreateRequest(BaseModel):
     cve_url: str
     poc_url: str
     check_id: str
+    # The submit page's switch: off for no harness, on for with harness. The
+    # inputs are the same two links either way, so this chooses only the route
+    # - and defaults off, so an old client cannot select the new one by
+    # omission.
+    harness: bool = False
 
 
 DEFAULT_ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "testserver"})
@@ -240,8 +245,8 @@ def _criteria(artifacts: list[dict[str, Any]], attempt_dir: Path) -> dict[str, A
 
 
 def _held_details(job: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-    # list_artifacts does not return paths, so the record is located from the
-    # attempt directory and still checked against the digest that was recorded.
+    # Located from the attempt directory rather than from the row's path, and
+    # still checked against the digest that was recorded with it.
     expected = ""
     for item in artifacts:
         if str(item.get("kind") or "") == "held_vms":
@@ -1056,6 +1061,10 @@ def build_app(
             broker_socket=broker_socket,
             hold_s=float(os.environ.get("XENTRY_HOLD_S", "0")),
             job_deadline_s=float(os.environ.get("XENTRY_JOB_DEADLINE_S", "7200")),
+            # Harness mode's model. Passed here and nowhere else, so a harness
+            # job in production has a provisioner while every test that does
+            # not ask for one gets None - which is a refusal, not a fallback.
+            provision_fn=harness.provisioner,
             target_deadlines={
                 "php2shell": float(os.environ.get("XENTRY_JOB_TIMEOUT_PHP", "5400")),
                 "gitlab": float(os.environ.get("XENTRY_JOB_TIMEOUT_GITLAB", "7200")),
@@ -1472,6 +1481,7 @@ def build_app(
                     payload.poc_url,
                     check_id=payload.check_id,
                     bundle_sha256=str(row["bundle_sha256"]),
+                    harness=payload.harness,
                 )
             except BrokerError as exc:
                 conn.execute(
@@ -1636,6 +1646,35 @@ def build_app(
         finally:
             conn.close()
         return {"cancelled": True, "job_id": job_id}
+
+    # The harness session, for the live feed in the provision row (ADR 0003).
+    # Polled rather than streamed: a provisioning session is minutes to tens of
+    # minutes of one model's calls, and a request that costs one SELECT and one
+    # sequential read of a file the attempt already keeps is cheaper to hold
+    # open nothing for than an SSE generator is to keep alive across it.
+    #
+    # Read-only. Nothing here writes, and the records are served as the chain
+    # holds them - `hash` and `prev_hash` included, so a reader who does not
+    # trust this endpoint can verify the sequence rather than believe it.
+    #
+    # The cursor is an index into the WHOLE journal, not into the session
+    # events, so it steps over the records this route filters out: an event
+    # cannot be served twice, and nothing is skipped when the runner writes a
+    # step transition in between. A cursor from a shorter journal than the
+    # caller's is impossible (append-only), and a negative one is clamped
+    # rather than read as a slice from the end.
+    #
+    # `closing` instead of this module's usual try/finally for the same close
+    # in two lines rather than five: this file is on a hard line budget.
+    @app.get("/api/jobs/{job_id}/session")
+    def session_api(job_id: str, cursor: int = 0) -> dict[str, Any]:
+        with closing(db()) as conn:
+            job = get_job(conn, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="unknown job")
+        journal = events.read(Path(str(job["attempt_dir"])) / "events.jsonl")
+        session = [r for r in journal[max(cursor, 0):] if str(r.get("type", "")).startswith("session_")]
+        return {"items": session, "cursor": len(journal)}
 
     @app.get("/api/jobs/{job_id}/events")
     async def events_api(job_id: str) -> EventSourceResponse:

@@ -44,7 +44,22 @@ destroy.dataset.job = "env-9";
 destroy.appendChild(Object.assign(makeEl("span"), { className: "spinner" }));
 destroy.querySelector = (sel) => (sel === ".spinner" ? destroy.children[0] : null);
 card.appendChild(destroy);
-card.querySelector = (sel) => (sel === "button.destroy-env" ? destroy : null);
+// cardState() looks for an existing status slot, then for a row to put a new
+// one in. The rebuilt card template has neither, so it creates the slot - the
+// fake has to let it, or the refusal has nowhere to land.
+let slot = null;
+const row = makeEl("span");
+row.prepend = (el) => {
+  slot = el;
+  row.appendChild(el);
+};
+card.appendChild(row);
+card.querySelector = (sel) => {
+  if (sel === "button.destroy-env") return destroy;
+  if (sel === ".release-state") return slot;
+  if (sel === ".row span" || sel === ".row") return row;
+  return null;
+};
 document.root.appendChild(card);
 
 // Two cards in the held section and one rebuilt, as the template renders them.
@@ -133,8 +148,16 @@ setTimeout(() => {
     replies.push({ ok: false, statusText: "Conflict", json: async () => ({ detail: "no such environment" }) });
     destroy.dispatch("click");
     setTimeout(() => {
-      check("a refusal is shown to the reader",
-        document.byId["message"].textContent === "no such environment",
+      // IN THE CARD now, not the page-wide strip: a sentence about this card
+      // rendered at the top of the page is a sentence about something the
+      // reader is not looking at.
+      check("a refusal is shown in the card",
+        slot !== null && slot.textContent === "no such environment",
+        slot === null ? "no status slot was created" : slot.textContent);
+      check("and it is marked as an error",
+        slot !== null && slot.classList.contains("error"));
+      check("and nothing was written to the page strip",
+        document.byId["message"].textContent !== "no such environment",
         document.byId["message"].textContent);
       check("and the button is usable again",
         !destroy.classList.contains("busy") || destroy.disabled === false);

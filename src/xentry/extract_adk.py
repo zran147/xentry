@@ -15,6 +15,7 @@ from google.genai import types
 
 from xentry import transcript
 from xentry.extract import (
+    JSON_ONLY,
     ArtifactText,
     ExtractorError,
     _parse_json,
@@ -47,7 +48,7 @@ async def _run(artifacts: list[ArtifactText]) -> Facts:
     )
     agent = LlmAgent(
         name="xentry_extractor",
-        model=LiteLlm(model=model),
+        model=LiteLlm(model=model, **JSON_ONLY),
         instruction=(
             "Extract only the requested facts from the supplied artifacts. "
             "Return one JSON object with the requested keys. Never invent a quote or hash. "
@@ -88,13 +89,37 @@ async def _run(artifacts: list[ArtifactText]) -> Facts:
             transcript.record("extract", prompt, json.dumps(output, indent=2, sort_keys=True))
             facts = _validate(coerce_facts(output, artifacts))
         else:
-            text = ""
             content = getattr(final, "content", None)
             parts = getattr(content, "parts", None) or []
-            if parts:
-                text = getattr(parts[0], "text", "") or ""
+            # parts[0] WAS the answer, until the account moved to a reasoning
+            # model. ADK turns a provider's reasoning into Part(thought=True)
+            # and puts it first, so parts[0] became 11,754 characters of the
+            # model thinking its way through sudo CVE-2025-32463 and ending
+            # "Write JSON." - and the JSON it wrote next, in a later part, was
+            # never read. deepseek-chat emitted no thought part, which is the
+            # only reason this held up for as long as it did.
+            #
+            # The answer is every part that is NOT a thought; the thinking is
+            # recorded under its own stage rather than thrown away, because it
+            # is the only account of how a verdict was reached.
+            text = "".join(p.text or "" for p in parts if not getattr(p, "thought", False))
+            mind = "".join(p.text or "" for p in parts if getattr(p, "thought", False))
+            transcript.record("extract.reasoning", prompt, mind)
             transcript.record("extract", prompt, text)
-            facts = _validate(coerce_facts(_parse_json(text), artifacts))
+            # The event knows why it stopped and what it spent; this path threw
+            # both away, so a truncated reply and a model that simply ended
+            # read identically as "finish_reason=unknown".
+            #
+            # thoughts_token_count is the one that matters: DeepSeek charges
+            # hidden reasoning against the same ceiling as the visible answer,
+            # so a 2,500-token reply that stopped at "Final JSON." was either
+            # the model finishing or 5,700 reasoning tokens pushing the total
+            # into max_tokens - and only this number tells the two apart.
+            use = getattr(final, "usage_metadata", None)
+            why = (f"{getattr(final, 'finish_reason', '') or 'unknown'}, "
+                   f"{getattr(use, 'candidates_token_count', '?')} visible + "
+                   f"{getattr(use, 'thoughts_token_count', '?')} reasoning tokens")
+            facts = _validate(coerce_facts(_parse_json(text, why), artifacts))
         verify_facts(facts, artifacts)
         return facts
     finally:

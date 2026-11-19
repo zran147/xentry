@@ -18,220 +18,101 @@ The LLM verdict is an assessment, not a deterministic proof and not a production
 
 * Ubuntu 26.04 LTS deployment host (24.04+ also supported) with KVM (`/dev/kvm`), system libvirt, QEMU, nftables, cloud-init tooling, `tshark`, and AppArmor for the final Gate B.
 * Python 3.12 (installed and pinned through `uv`) and `uv`.
-* A DeepSeek API key in `.env` for development or `/etc/xentry/app.env` for a systemd deployment. Never commit the key.
+* A DeepSeek API key in `/etc/xentry/app.env`, or in `.env` for a local checkout. Never commit the key.
 * No Docker or other container runtime.
 
-The current development host is WSL2 (Ubuntu 26.04.1). It passes KVM, libvirt, QEMU, nftables, and disk checks, but AppArmor is inactive. Gate B's AppArmor and QEMU-user checks must run on the deployment host.
+The development host is WSL2 (Ubuntu 26.04.1). It passes KVM, libvirt, QEMU, nftables, and disk checks, but AppArmor is inactive there, so Gate B's AppArmor and QEMU-user checks must run on the deployment host.
 
-## Quick start
+## Install
 
-```bash
-cp .env.example .env          # fill DEEPSEEK_API_KEY; never commit .env
-uv sync --extra app --extra dev --extra broker
-scripts/fetch-artifacts.sh --download
-scripts/build-images.sh --execute          # first run or after a manifest change
-pytest -q
-```
-
-For development on the WSL2 host, run the broker under the `libvirt` group and the app as the normal user:
+Three commands, in this order.
 
 ```bash
-sg libvirt -c 'cd "$PWD" && \
-  XENTRY_BROKER_SOCKET="$PWD/var/run/broker.sock" \
-  XENTRY_DATA_DIR="$PWD/var/lib" \
-  XENTRY_IMAGE_DIR="$PWD/var/images" \
-  XENTRY_ARTIFACT_CATALOG="$PWD/config/artifacts.yaml" \
-  XENTRY_ARTIFACT_MANIFEST="$PWD/var/artifacts/manifest.json" \
-  XENTRY_STEPS_MANIFEST="$PWD/targets/steps.yaml" \
-  XENTRY_TARGETS_DIR="$PWD/targets" \
-  XENTRY_APPLY_NFT=0 XENTRY_QEMU_USER="$USER" \
-  PYTHONPATH="$PWD" uv run --extra app --extra broker python -m broker.main'
-
-XENTRY_BROKER_SOCKET="$PWD/var/run/broker.sock" \
-XENTRY_DATA_DIR="$PWD/var/instance" \
-XENTRY_DB_PATH="$PWD/var/instance/xentry.db" \
-uv run --env-file .env --extra app uvicorn xentry.web.app:app --host 127.0.0.1 --port 8000
+sudo git clone https://github.com/zran147/xentry /opt/xentry
+sudo /opt/xentry/install.sh                 # stops at step 7 for the key
+sudo nano /etc/xentry/app.env               # put DEEPSEEK_API_KEY in it
+sudo /opt/xentry/install.sh                 # continues from step 8
 ```
 
-The production broker runs as root from `/opt/xentry-broker`; the app never joins `libvirt` and never receives guest SSH keys. nftables is applied by the production broker. AppArmor, nftables application, root-broker serial evidence, and the `xentry-vm` QEMU user are deployment-host checks. QEMU is confined by libvirt's AppArmor security driver, which generates a per-domain profile from the domain XML; there is no static emulator profile. After installing the units and the AppArmor deny drop-in, run `scripts/verify_deployment.py` as root; it reports every required deployment-host check without changing host state.
+`install.sh` does not clone: it configures a host around the tree already at
+`/opt/xentry`, and stops if that tree is missing rather than fetching something
+you did not choose. It is every other command the deployment needs, in order,
+announcing each as it starts it (`==> step 4/12  code and the two
+virtualenvs`). It must run as root, and re-running is safe: users, groups,
+directories and files are created only when they are missing.
 
-## Deployment setup (Ubuntu 26.04)
+**The minimum to run is one variable.** Every setting has a working default
+except `DEEPSEEK_API_KEY`, which has no sensible one - `extract.py` and
+`validator.py` raise `provider_unavailable` without it, and those two steps are
+how a CVE becomes a plan. Step 7 writes `/etc/xentry/app.env` from
+`.env.example` with the production paths already filled in, so that key is the
+only line you must edit by hand. Everything else in the next section is worth
+reading but optional.
 
-These commands install the production layout used by the checked-in systemd
-units. Replace the `REPO_URL` example with your repository URL. Run the
-commands in a normal shell with `sudo`; the broker and app services themselves
-run as separate identities.
+| | |
+|---|---|
+| 1 | host packages |
+| 2 | users, groups, and directories |
+| 3 | `uv` and a private Python 3.12 under `/opt/uv-python` |
+| 4 | code and the two virtualenvs |
+| 5 | pinned artifacts and the three images |
+| 6 | QEMU user and libvirt |
+| 7 | environment files |
+| 8 | systemd units and the services |
+| 9 | AppArmor deny rules and the deployment verifier |
+| 10 | optional: serve on a routable address |
+| 11 | optional: the mirror VM |
+| 12 | optional: developer access |
+| 13 | first job |
 
-### 1. Host packages
+**`DEV=1` makes the installed tree editable** instead of root-owned, which is
+what you want when the loop is change the code, restart, look, change again.
+It puts `src/`, `tests/`, `broker/` and `targets/` in a new `xentry-dev` group,
+group-writable and setgid so later files inherit the group, and grants two
+narrow `sudo` rules: restarting the two services, and `/usr/local/sbin/xentry-read`
+for read-only diagnostics. It does **not** touch `/etc/xentry`,
+`/var/lib/xentry` or either virtualenv, so `app.env` stays `640 root:xentry`
+and a developer still cannot read the API key. Group membership needs a new
+login shell; until then, `sg xentry-dev -c '<command>'` works in the current
+one.
+
+To take a host back to before step 1, `uninstall.sh` is the inverse: it removes
+the services, the tree, the state, the VMs, the networks, the nftables tables,
+the users and groups, and offers the host packages that nothing else needs. It
+refuses unless you confirm, and it tells you what it is about to destroy first.
+
+Step 7 is where it stops the first time, and nothing is enabled or started
+until the key is in place - a half-configured service that fails on its first
+job is worse than one that was never started. The next section is what each
+variable in that file means.
+
+Two optional steps are off unless you ask for them, and say so when skipped:
 
 ```bash
-sudo apt-get update
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  qemu-system-x86 qemu-utils \
-  libvirt-daemon-system libvirt-daemon-driver-qemu libvirt-clients \
-  cloud-image-utils genisoimage xorriso \
-  nftables apparmor apparmor-utils \
-  tshark openssh-client \
-  curl ca-certificates git \
-  sqlite3
+sudo XENTRY_BIND_ADDR=192.168.137.10 XENTRY_ADMIN_IPS="10.0.0.5" /opt/xentry/install.sh
+sudo INSTALL_PROXY_VM=1 /opt/xentry/install.sh
+sudo DEV=1 /opt/xentry/install.sh          # or DEV=1 DEV_USER=someone
 ```
 
-`qemu-system-x86` provides `qemu-system-x86_64`; `qemu-utils` provides
-`qemu-img`; `cloud-image-utils` provides `cloud-localds`. `tshark` is required
-to parse the target-side GitLab capture. The package installation may ask about
-non-superuser packet capture; the broker runs as root and does not need the
-`wireshark` group. The primary capture path is QEMU's `filter-dump`; the
-checked-in broker unit also grants `CAP_NET_RAW` for the `tshark` tap fallback.
-
-### 2. Users, groups, and directories
-
-```bash
-# Host service users. These are not the guest account xentry-guest, which is
-# created inside each VM by cloud-init.
-sudo groupadd --system xentry 2>/dev/null || true
-sudo groupadd --system xentry-vm 2>/dev/null || true
-id -u xentry >/dev/null 2>&1 || sudo useradd --system \
-  --gid xentry --home-dir /var/lib/xentry --create-home \
-  --shell /usr/sbin/nologin xentry
-id -u xentry-vm >/dev/null 2>&1 || sudo useradd --system \
-  --gid xentry-vm --home-dir /var/lib/xentry-vm --create-home \
-  --shell /usr/sbin/nologin xentry-vm
-sudo usermod -aG kvm xentry-vm
-
-# App-owned state: SQLite index, app job attempts, broker job directories, and
-# the broker mirror. Broker-created subdirectories remain root-owned.
-sudo install -d -m 0750 -o xentry -g xentry /var/lib/xentry
-sudo install -d -m 0750 -o xentry -g xentry /var/lib/xentry/jobs
-sudo install -d -m 0750 -o xentry -g xentry /var/lib/xentry/mirror
-# Read-only build inputs: images are read by QEMU; artifacts are read by the
-# root broker and the app preflight, so the app group gets read access.
-sudo install -d -m 0755 -o root -g root /var/lib/xentry/images
-sudo install -d -m 0750 -o root -g xentry /var/lib/xentry/artifacts
-sudo install -d -m 0750 -o root -g xentry /etc/xentry
-```
+**One tree, two virtualenvs.** The code lives only in `/opt/xentry`. The app
+runs from `/opt/xentry/.venv` (the `app` and `dev` dependency groups) and the
+broker from `/opt/xentry/.venv-broker` (the `broker` group: `asyncssh`,
+`pyyaml`), with `WorkingDirectory=/opt/xentry`, so `broker.main`,
+`config/artifacts.yaml` and `targets/` resolve from that one tree. There is no
+`/opt/xentry-broker`. Do not put a `.env` file in the production tree; the
+services read `/etc/xentry/app.env` and `/etc/xentry/broker.env`.
 
 The broker unit runs `User=root Group=xentry` so `/run/xentry` and the broker
 socket are accessible to the unprivileged `xentry` app. The broker still needs
-root for libvirt and nftables. The app is added to no libvirt or KVM group.
+root for libvirt and nftables, and it is what applies nftables. The app joins
+no libvirt or KVM group and never receives guest SSH keys.
 
-### 3. Install `uv` and Python 3.12
+## Environment variables
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-sudo install -m 0755 "$HOME/.local/bin/uv" /usr/local/bin/uv
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-  /usr/local/bin/uv python install 3.12
-sudo chmod -R a+rX /opt/uv-python
-```
-
-Ubuntu 26.04's system Python may be newer than 3.12. `uv` installs a private
-3.12 under `/opt/uv-python`; the app and broker virtualenvs point at it. Keep
-`/opt/uv-python` readable by `xentry`.
-
-### 4. Install the code and virtualenvs
-
-```bash
-export REPO_URL=https://github.com/your-org/xentry.git
-sudo git clone "$REPO_URL" /opt/xentry
-sudo git clone "$REPO_URL" /opt/xentry-broker
-sudo chown -R root:root /opt/xentry /opt/xentry-broker
-sudo chmod -R go-w /opt/xentry /opt/xentry-broker
-sudo chmod -R a+rX /opt/xentry /opt/xentry-broker
-
-cd /opt/xentry
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-  /usr/local/bin/uv sync --python 3.12 --extra app
-sudo chmod -R a+rX /opt/xentry/.venv
-
-cd /opt/xentry-broker
-sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-  /usr/local/bin/uv sync --python 3.12 --extra broker
-
-cd /opt/xentry
-sudo .venv/bin/python -c 'import xentry; print(xentry.__file__)'
-cd /opt/xentry-broker
-sudo .venv/bin/python -c 'import broker; print(broker.__file__)'
-```
-
-The app import must resolve under `/opt/xentry/src`, and the broker import
-under `/opt/xentry-broker/broker`.
-
-The app stays in `/opt/xentry` and runs from its editable install. The broker
-copy stays in `/opt/xentry-broker`; its unit starts it with that working
-directory, so `broker.main`, `config/artifacts.yaml`, and `targets/` resolve
-from the broker tree. Do not put a `.env` file in either production tree; the
-services read `/etc/xentry/app.env` and `/etc/xentry/broker.env`.
-
-### 5. Fetch pinned artifacts and build images
-
-```bash
-cd /opt/xentry
-sudo env UV_BIN=/usr/local/bin/uv UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-  XENTRY_ARTIFACT_DIR=/var/lib/xentry/artifacts \
-  scripts/fetch-artifacts.sh --download
-
-sudo env UV_BIN=/usr/local/bin/uv UV_PYTHON_INSTALL_DIR=/opt/uv-python \
-  XENTRY_IMAGE_DIR=/var/lib/xentry/images \
-  scripts/build-images.sh --execute
-
-sudo chown -R root:root /var/lib/xentry/images
-sudo chmod -R a+rX /var/lib/xentry/images
-sudo chown -R root:xentry /var/lib/xentry/artifacts
-sudo chmod -R g+rX,o-rwx /var/lib/xentry/artifacts
-```
-
-`fetch-artifacts.sh` writes `manifest.json` under
-`/var/lib/xentry/artifacts` with production paths. `build-images.sh` writes
-`build-results.json` and the three qcow2 images under
-`/var/lib/xentry/images`; it needs `/dev/kvm` and therefore must run on the
-KVM-capable host, as root here.
-
-### 6. QEMU user and libvirt
-
-```bash
-sudo systemctl enable --now apparmor
-sudo systemctl enable --now libvirtd
-sudo cp /etc/libvirt/qemu.conf /etc/libvirt/qemu.conf.orig
-sudoedit /etc/libvirt/qemu.conf
-```
-
-Set or uncomment these values:
-
-```text
-user = "xentry-vm"
-group = "kvm"
-security_driver = "apparmor"
-```
-
-The QEMU process runs as user `xentry-vm` and group `kvm` so it can open
-`/dev/kvm`. The broker chowns the overlay, seed, and serial files to the
-`xentry-vm` user, so ownership still limits access to the job files.
-
-Then restart libvirt and check the KVM path:
-
-```bash
-sudo systemctl restart libvirtd
-sudo virsh -c qemu:///system net-list --all
-sudo -u xentry-vm test -r /dev/kvm && echo "xentry-vm can read /dev/kvm"
-```
-
-The broker runs as root and drives libvirt; `xentry-vm` is only the QEMU
-process identity. The broker makes the job directories traversable for QEMU and
-chowns the overlay, seed, and serial files it owns to `xentry-vm`.
-
-### 7. Environment files
-
-The app service reads `/etc/xentry/app.env`; it does not use the development
-`.env`. Copy the example and edit it:
-
-```bash
-sudo cp /opt/xentry/.env.example /etc/xentry/app.env
-sudo chown root:xentry /etc/xentry/app.env
-sudo chmod 0640 /etc/xentry/app.env
-sudoedit /etc/xentry/app.env
-sudo chown root:xentry /etc/xentry/app.env
-sudo chmod 0640 /etc/xentry/app.env
-```
+The app service reads `/etc/xentry/app.env`; it does not use a development
+`.env`. Step 7 of `install.sh` creates it from
+[`.env.example`](.env.example), owned `root:xentry` mode `0640`, and sets the
+production paths. Edit it with `sudoedit /etc/xentry/app.env`.
 
 Set at least:
 
@@ -248,9 +129,12 @@ XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
 XENTRY_TARGETS_DIR=/opt/xentry/targets
 ```
 
-For the experimental tab, which asks a model to write the PoC instead of taking
-a PoC link, add a model as well. Any provider litellm speaks works; for a local
-`llama.cpp` server use the `openai/` prefix and point the base at its
+Everything but the key is already set by `install.sh`; the key is the one
+thing it will not write for you.
+
+For the experimental tab, which asks a model to write the PoC instead of
+taking a PoC link, add a model as well. Any provider litellm speaks works; for
+a local `llama.cpp` server use the `openai/` prefix and point the base at its
 OpenAI-compatible endpoint:
 
 ```text
@@ -261,7 +145,8 @@ XENTRY_POC_ATTEMPTS=3
 ```
 
 `llama.cpp` ignores the key, but litellm requires one to be present. With
-`XENTRY_POC_MODEL` empty the tab explains what to set and submits nothing.
+`XENTRY_POC_MODEL` empty the tab explains what to set and submits nothing,
+which is why `install.sh` only mentions it and moves on.
 
 Keep the rest of `.env.example` values unless you change a budget or model.
 An `nvd.nist.gov/vuln/detail/<CVE-ID>` link is resolved to the matching record
@@ -275,7 +160,9 @@ every redirect hop. Any other CVE link is fetched exactly as given.
 
 There is no environment variable for the app's listen address: the bind lives
 in the unit, and a non-loopback bind is the drop-in below. `XENTRY_APP_PORT`
-and `XENTRY_APP_HOST` are read by nothing.
+and `XENTRY_APP_HOST` are read by nothing — `XENTRY_APP_HOST` is still in
+`.env.example`, but the bind address is in the unit's `ExecStart`, which
+defaults to `127.0.0.1`.
 
 `XENTRY_ALLOWED_HOSTS` is the Host-header allowlist; add every hostname or
 address you use to reach the app, without a port (the check compares the
@@ -283,10 +170,7 @@ hostname only). `localhost`, `127.0.0.1`, and `::1` are always allowed. A
 missing entry is not a startup error: the app serves pages and then rejects
 every POST with `403 host_invalid`.
 
-`XENTRY_APP_HOST` in `.env.example` is not read by anything; the bind address
-lives in the unit's `ExecStart`, which defaults to `127.0.0.1`.
-
-#### Serving on a routable address
+### Serving on a routable address
 
 The app has **no authentication**. The Host, Origin, CSRF, and JSON checks
 stop cross-site requests, not a direct client: any client that can reach the
@@ -294,154 +178,142 @@ port may `GET /`, receive the token cookie, and `POST /api/jobs`. Submitting a
 job detonates a real exploit in a VM on this host, and the evidence API serves
 every stored artifact. Treat the listening socket as the access boundary.
 
-To serve on a routable address, override the bind with a drop-in rather than
-editing the shipped unit, name the address in the Host allowlist, and install
-the source allowlist:
+Step 10 of `install.sh` does it only when you name both the address and the
+clients allowed to reach it:
 
 ```bash
-sudo install -d -m 0755 /etc/systemd/system/xentry.service.d
-sudo tee /etc/systemd/system/xentry.service.d/10-bind.conf >/dev/null <<'UNIT'
-[Service]
-ExecStart=
-ExecStart=/opt/xentry/.venv/bin/uvicorn xentry.web.app:app --host 192.168.137.10 --port 8000
-UNIT
-sudo sed -i 's|^XENTRY_ALLOWED_HOSTS=.*|XENTRY_ALLOWED_HOSTS=192.168.137.10|' /etc/xentry/app.env
-sudo /opt/xentry/scripts/install-webfilter.sh <admin-ip> [<admin-ip>...]
-sudo systemctl daemon-reload && sudo systemctl restart xentry
+sudo XENTRY_BIND_ADDR=192.168.137.10 XENTRY_ADMIN_IPS="10.0.0.5 10.0.0.6" \
+  ./install.sh
 ```
 
+It overrides the bind with `/etc/systemd/system/xentry.service.d/10-bind.conf`
+rather than editing the shipped unit, puts the address in
+`XENTRY_ALLOWED_HOSTS`, and runs `scripts/install-webfilter.sh` with the
+addresses you listed.
+
 `scripts/install-webfilter.sh` builds `table inet xentry_admin`, which accepts
-the app's port only from the addresses you list, accepts it on loopback, and
-drops it from everywhere else. The chain policy is `accept` and only that one
-port is filtered, so no other service can be locked out by it. The table is
-separate from the broker's `inet xentry`: that one hooks `forward` and is
-deleted and re-added on every job phase, while this one hooks `input` and the
-broker never touches it. The script also installs
-`xentry-webfilter.service` so the rules are re-applied on boot.
+the app's port only from those addresses, accepts it on loopback, and drops it
+from everywhere else. The chain policy is `accept` and only that one port is
+filtered, so no other service can be locked out by it. The table is separate
+from the broker's `inet xentry`: that one hooks `forward` and is deleted and
+re-added on every job phase, while this one hooks `input` and the broker never
+touches it. The script also installs `xentry-webfilter.service` so the rules
+are re-applied on boot.
 
 Binding to the routable address alone means `127.0.0.1:8000` is no longer
 listening; reach the app at the address in the drop-in. Deleting the drop-in
 and running `daemon-reload` plus `restart xentry` returns the app to loopback.
 
-Create the broker-only environment file:
+### /etc/xentry/broker.env
 
-```bash
-sudo tee /etc/xentry/broker.env >/dev/null <<'EOF'
+Step 7 writes the broker's own environment file, mode `0600` and `root:root`,
+and leaves it alone if it already exists:
+
+```text
 XENTRY_BROKER_SOCKET=/run/xentry/broker.sock
 XENTRY_DATA_DIR=/var/lib/xentry
 XENTRY_IMAGE_DIR=/var/lib/xentry/images
 XENTRY_ARTIFACT_MANIFEST=/var/lib/xentry/artifacts/manifest.json
-XENTRY_ARTIFACT_CATALOG=/opt/xentry-broker/config/artifacts.yaml
-XENTRY_STEPS_MANIFEST=/opt/xentry-broker/targets/steps.yaml
-XENTRY_TARGETS_DIR=/opt/xentry-broker/targets
+XENTRY_ARTIFACT_CATALOG=/opt/xentry/config/artifacts.yaml
+XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
+XENTRY_TARGETS_DIR=/opt/xentry/targets
 XENTRY_APPLY_NFT=1
 XENTRY_START_MIRROR=1
 XENTRY_QEMU_USER=xentry-vm
-# Both provisioning channels. Each is reachable from a guest while it
-# provisions and is closed by lock_network before any PoC runs, so each is
-# opted into here rather than assumed. Without the first, every derived apt
-# target fails at provision; without the second, every ecosystem target does.
 XENTRY_START_APT_PROXY=1
 XENTRY_START_REGISTRY_PROXY=1
-EOF
-sudo chown root:root /etc/xentry/broker.env
-sudo chmod 0600 /etc/xentry/broker.env
 ```
+
+The last two are both provisioning channels. Each is reachable from a guest
+while it provisions and is closed by `lock_network` before any PoC runs, so
+each is opted into here rather than assumed. Without the first, every derived
+apt target fails at provision; without the second, every ecosystem target
+does.
 
 Do not put the DeepSeek key in `broker.env`.
 
-### 8. Install and start the services
+### The mirror VM cut-over
 
-```bash
-sudo install -m 0644 /opt/xentry/deploy/xentry-broker.service \
-  /etc/systemd/system/xentry-broker.service
-sudo install -m 0644 /opt/xentry/deploy/xentry.service \
-  /etc/systemd/system/xentry.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now xentry-broker.service
-sudo systemctl enable --now xentry.service
-sudo systemctl --no-pager status xentry-broker.service xentry.service
+The five package mirrors — apt snapshot, registry, OCI — have historically run
+inside the broker process, as root on the host, bound to each job network's
+gateway. [ADR 0002](docs/adr/0002-mirrors-in-their-own-vm.md) moves them into
+a VM of their own, so a guest fetching a package is no longer a guest opening
+a connection to a root process on this host. Step 11 of `install.sh` builds
+it; [`deploy/proxy-vm/README.md`](deploy/proxy-vm/README.md) is what each
+piece refuses to do and the failures that shaped it.
+
+**Nothing is cut over until two variables are set** in `broker.env`, followed
+by a restart of `xentry-broker`:
+
+```text
+XENTRY_WAN_BRIDGE=xentrywan0
+XENTRY_PROXY_IP=10.44.0.2
 ```
 
-The broker unit creates `/run/xentry` with mode `0750` and group `xentry`; the
-socket is mode `0660` and owned by `root:xentry`. Verify:
+With them unset, every nftables rule is byte-identical to the behaviour
+without the VM, and the mirrors stay in the broker process — a test asserts
+both shapes.
+
+With them set, five things change together, and a test asserts that too: the
+guests go on `xentry-target` and `xentry-attacker` (one bridge each, no host
+address), their mirrors are addressed at `10.44.0.2` and reached by routing
+through the VM, both phases are pushed to the VM instead of applied here, and
+the persistent bridges are never destroyed with a job.
+
+**No job has yet run through that path.** The first one is the test: watch its
+provision step, and if it cannot fetch, the phase and the lease are the two
+things to look at —
 
 ```bash
-ls -l /run/xentry/broker.sock
-curl -fsS http://127.0.0.1:8000/api/system   # or the address in the bind drop-in
+sudo /opt/xentry/scripts/proxy-vm-doctor.sh
+sudo ssh -i /etc/xentry/proxy-vm.key root@10.44.0.2 \
+  'nft list table inet xentry_phase; journalctl -u dnsmasq -n 30 --no-pager'
 ```
 
-The app is deliberately unauthenticated and loopback-only. Do not expose it to
-the network. The CSRF token is request integrity, not a login account.
+`/etc/xentry/proxy-vm.key` is generated on the VM's first run and is how the
+broker configures it per job. Keep it; `REBUILD=1` reuses it.
 
-### 9. AppArmor and final deployment checks
+## VM confinement
 
 QEMU confinement comes from libvirt's AppArmor security driver, not from a
-hand-written profile. With `security_driver = "apparmor"` (step 6), libvirtd
-runs virt-aa-helper and switches each domain's QEMU into a generated
-`libvirt-<uuid>` profile built from that domain's own XML, so the permitted
-overlay, seed ISO, serial log, and backing image are exactly this job's files.
-A profile attached to `/usr/bin/qemu-system-x86_64` is never entered in that
-configuration, so there is no static emulator profile to load.
-
-Confirm the driver is active and install the xentry deny rules:
-
-```bash
-sudo virsh -r -c qemu:///system capabilities | grep -A2 '<secmodel>'
-sudo /opt/xentry/scripts/install-apparmor.sh
-```
-
-The first command must list `apparmor` among the host security models; if it
-lists only `dac`, fix `security_driver` in step 6 before going further.
+hand-written profile. With `security_driver = "apparmor"` in
+`/etc/libvirt/qemu.conf` (step 6), libvirtd runs virt-aa-helper and switches
+each domain's QEMU into a generated `libvirt-<uuid>` profile built from that
+domain's own XML, so the permitted overlay, seed ISO, serial log, and backing
+image are exactly this job's files. A profile attached to
+`/usr/bin/qemu-system-x86_64` is never entered in that configuration, so there
+is no static emulator profile to load.
 
 `deploy/apparmor/local-libvirt-qemu` installs to
 `/etc/apparmor.d/local/abstractions/libvirt-qemu`, which the distro
 abstraction pulls into every generated domain profile. It only denies: app and
 broker state under `/etc/xentry`, `/run/xentry`, `/opt/xentry`, and the
 index/evidence/artifacts/mirror trees, plus writes to the pinned base images.
-The installer syntax-checks it before installing, because a bad rule here
-would break every VM on the host. Running domains keep their current profile,
-so the rules apply to domains started from then on.
+`scripts/install-apparmor.sh` syntax-checks it before installing, because a
+bad rule here would break every VM on the host. Running domains keep their
+current profile, so the rules apply to domains started from then on.
 
-Until the deployment checks pass and a job has been observed with its QEMU
-enforcing under a `libvirt-<uuid>` profile, the VM boundary is not a completed
-Gate B claim.
-
-Run the read-only deployment verifier as root, pointing at the production
-manifests:
+Step 9 runs `scripts/verify_deployment.py`, which checks the users, broker
+socket/group, systemd units, the libvirt AppArmor security model, the deny
+drop-in, the `libvirtd` and `virt-aa-helper` profiles, `/var/lib/xentry`
+paths, manifests, KVM, and `virsh` — read-only, changing no host state. Its
+`apparmor qemu confinement` check is advisory while the host is idle (nothing
+is confined when no VM is running) and a required gate once a VM is up: it
+fails if any running QEMU is unconfined or in complain mode. Re-run it during
+a job to exercise that, and confirm nftables is in the locked phase at the
+same time:
 
 ```bash
 cd /opt/xentry
 sudo .venv/bin/python scripts/verify_deployment.py \
   --artifacts-manifest /var/lib/xentry/artifacts/manifest.json \
   --images-manifest /var/lib/xentry/images/build-results.json
-```
-
-It checks the users, broker socket/group, systemd units, the libvirt AppArmor
-security model, the deny drop-in, the `libvirtd` and `virt-aa-helper`
-profiles, `/var/lib/xentry` paths, manifests, KVM, and `virsh`.
-
-The `apparmor qemu confinement` check is advisory while the host is idle
-(nothing is confined when no VM is running) and a required gate once a VM is
-up: it fails if any running QEMU is unconfined or in complain mode. Re-run the
-verifier during a job to exercise it, and confirm nftables is in the locked
-phase at the same time:
-
-```bash
 sudo nft list table inet xentry
 ```
 
-### 10. First job
-
-Open `http://127.0.0.1:8000` (or the address in the bind drop-in) and submit
-one of the pinned CVE/PoC pairs from
-[`docs/operations.md`](docs/operations.md). The service logs show broker and
-job progress:
-
-```bash
-sudo journalctl -u xentry-broker.service -f
-sudo journalctl -u xentry.service -f
-```
+Until those checks pass and a job has been observed with its QEMU enforcing
+under a `libvirt-<uuid>` profile, the VM boundary is not a completed Gate B
+claim.
 
 ## Phase 0 checks
 
@@ -457,9 +329,15 @@ scripts/run_target_php.py                  # PHP setup + readiness
 scripts/run_job_php.py                     # full PHP job through the runner
 ```
 
-The smoke scripts expect `sg libvirt -c '...'` on the WSL2 host. `scripts/run_job_php.py` starts its own broker server and uses the real extractor and validator.
+The smoke scripts expect `sg libvirt -c '...'` on the WSL2 development host. `scripts/run_job_php.py` starts its own broker server and uses the real extractor and validator.
 
 ## Layout
+
+`deploy/proxy-vm/` holds everything that is deployed **into** the mirror VM or
+onto the host's permanent firewall — `serve.py`, its nftables rulesets, its
+units, the phase renderer and the isolation probe. It sits outside `src/`,
+`broker/` and `scripts/` so the VM's own code does not compete for the line
+budget with the application that commands it.
 
 ```text
 docs/designs/     design and normative contracts
@@ -468,6 +346,7 @@ broker/           root-owned broker (registry skeleton)
 src/xentry/       app package (skeleton)
 targets/          checked-in setup scripts
 deploy/           systemd units and AppArmor profile
+install.sh        the deployment, step by step
 tests/            test suite
 var/              runtime state, gitignored
 ```
