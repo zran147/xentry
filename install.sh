@@ -19,7 +19,6 @@
 # Optional, all off by default:
 #   XENTRY_BIND_ADDR=10.0.0.5   serve the app on a routable address (step 10)
 #   XENTRY_ADMIN_IPS="a b"      addresses allowed to reach that port
-#   INSTALL_PROXY_VM=1          build the mirror VM (step 11)
 #   DEV=1                       developer access to the code tree (step 12)
 #
 # One tree, two virtualenvs: /opt/xentry/.venv is the app (app + dev groups)
@@ -56,7 +55,6 @@ ETC=/etc/xentry
 
 BIND_ADDR="${XENTRY_BIND_ADDR:-}"
 ADMIN_IPS="${XENTRY_ADMIN_IPS:-}"
-INSTALL_PROXY_VM="${INSTALL_PROXY_VM:-0}"
 DEV="${DEV:-0}"
 DEV_USER="${DEV_USER:-${SUDO_USER:-}}"
 
@@ -287,12 +285,15 @@ XENTRY_ARTIFACT_CATALOG=/opt/xentry/config/artifacts.yaml
 XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
 XENTRY_TARGETS_DIR=/opt/xentry/targets
 XENTRY_APPLY_NFT=1
-XENTRY_START_MIRROR=1
-# The mirror VM's address. Not a switch: these are the broker's own defaults
-# too, and an empty value does not fall back to running the mirrors on the host
-# - ADR 0002 removed that path. Written explicitly so the deployment states
-# where the mirrors are rather than relying on a constant in the code.
-XENTRY_WAN_BRIDGE=xentrywan0
+# The proxy VM's address. Not a switch: it is the broker's own default too,
+# and an empty value does not fall back to running the proxies on the host -
+# ADR 0002 removed that path and the code is now gone.
+#
+# There is no XENTRY_WAN_BRIDGE here, and no XENTRY_START_MIRROR. Both reached
+# only the host-side rule builders and the host-side artifact mirror, which
+# were deleted with that path; the bridge name is fixed in
+# deploy/proxy-vm/host-wan.nft. A variable the code does not read is worse
+# than no variable: it reads as configuration and changes nothing.
 XENTRY_PROXY_IP=10.44.0.2
 XENTRY_QEMU_USER=xentry-vm
 # Both provisioning channels. Each is reachable from a guest while it
@@ -313,6 +314,15 @@ grep -n 'DEEPSEEK' "$ETC/broker.env" && die "remove the key from broker.env" || 
 # explains what to set. grep finding nothing must not end the run.
 grep -nE '^XENTRY_POC_MODEL=.+' "$ETC/app.env" ||
 	note "XENTRY_POC_MODEL is unset: the experimental tab is off (fine)"
+# Not fine, and it fails in a way that does not look like a rate limit: without
+# a token GitHub allows 60 requests an hour per address, a check spends one
+# listing the PoC repository, and after the quota every check reads an empty
+# listing - reported as "the PoC text does not name a file that runs the
+# exploit", a verdict about content for a list never read.
+grep -qE '^XENTRY_GITHUB_TOKEN=.+' "$ETC/app.env" ||
+	{ note "XENTRY_GITHUB_TOKEN is unset. Fine for a few CVEs; a sweep will"
+	  note "exhaust GitHub's 60-an-hour and the refusals will blame the PoC"
+	  note "text instead of the quota. A no-scope token raises it to 5,000."; }
 
 if [ -z "$(env_value "$ETC/app.env" DEEPSEEK_API_KEY)" ]; then
 	cat <<EOF
@@ -323,8 +333,26 @@ Stopping here, with the host fully prepared and nothing started.
 
   1. sudoedit $ETC/app.env
   2. set DEEPSEEK_API_KEY=<your-key>
-  3. check XENTRY_ALLOWED_HOSTS lists every hostname you reach the app by
-  4. re-run: sudo $0
+  3. to reach the app from the network, set BOTH of these. They are not the
+     same setting and one without the other does not work:
+
+       XENTRY_BIND_ADDR     WHERE THE SOCKET LISTENS. Empty means 127.0.0.1
+                            only, and nothing on the network can reach the
+                            port at all.
+       XENTRY_ALLOWED_HOSTS WHICH Host: HEADERS ARE ACCEPTED once a request
+                            does arrive. A missing entry is not a startup
+                            error: the app serves pages and then rejects
+                            every POST with 403 host_invalid.
+
+     Set only the first and every POST is refused. Set only the second and
+     nothing reaches the app to be refused. This script copies BIND_ADDR into
+     ALLOWED_HOSTS for you, so add a name here only for a hostname or reverse
+     proxy you also use.
+
+  4. XENTRY_BIND_ADDR also needs XENTRY_ADMIN_IPS - the source addresses
+     allowed to reach that port - because the app has NO authentication.
+     DEV=1 accepts any source when that list is empty, and says so.
+  5. re-run: sudo $0
 
 README.md explains what every variable in that file does. Steps 1-7 are
 already done; re-running repeats them harmlessly and continues from step 8.
@@ -390,12 +418,30 @@ note "  sudo nft list table inet xentry"
 step "optional: serve on a routable address"
 ################################################################################
 
+# Both are read from app.env, which step 7 stops for, so publishing the app is
+# one edit in one file rather than an environment variable remembered at the
+# right moment. An argument still wins, for a one-off.
+[ -n "$BIND_ADDR" ] || BIND_ADDR=$(env_value "$ETC/app.env" XENTRY_BIND_ADDR)
+[ -n "$ADMIN_IPS" ] || ADMIN_IPS=$(env_value "$ETC/app.env" XENTRY_ADMIN_IPS)
+
 if [ -z "$BIND_ADDR" ]; then
-	note "not requested. The app has NO authentication and is loopback-only."
-	note "To publish it: XENTRY_BIND_ADDR=<addr> XENTRY_ADMIN_IPS='<ip> ...'"
-elif [ -z "$ADMIN_IPS" ]; then
-	die "XENTRY_BIND_ADDR needs XENTRY_ADMIN_IPS: the source allowlist"
+	note "XENTRY_BIND_ADDR is empty in $ETC/app.env: the app stays on"
+	note "127.0.0.1 only. Nothing on the network can reach it - and that is"
+	note "a bind, not a Host-header question, so XENTRY_ALLOWED_HOSTS does"
+	note "not change it. Set it there and re-run to publish the app."
+elif [ -z "$ADMIN_IPS" ] && [ "$DEV" != 1 ]; then
+	die "XENTRY_BIND_ADDR needs XENTRY_ADMIN_IPS, or DEV=1 to accept any source"
 else
+	if [ -z "$ADMIN_IPS" ]; then
+		# DEV=1 with no list. Said out loud, because it is the one default
+		# that would otherwise put an unauthenticated port on every network
+		# this host is attached to.
+		ADMIN_IPS="0.0.0.0/0 ::/0"
+		note "DEV=1 and XENTRY_ADMIN_IPS is empty: the port will accept ANY"
+		note "source address. The app has no authentication, so anyone who"
+		note "can route to $BIND_ADDR:8000 can submit a job that detonates a"
+		note "real exploit on this host and can read every stored artifact."
+	fi
 	install -d -m 0755 /etc/systemd/system/xentry.service.d
 	cat >/etc/systemd/system/xentry.service.d/10-bind.conf <<UNIT
 [Service]
@@ -412,19 +458,30 @@ UNIT
 fi
 
 ################################################################################
-step "optional: the mirror VM"
+step "the proxy VM"
 ################################################################################
 
-if [ "$INSTALL_PROXY_VM" != 1 ]; then
-	note "not requested; the mirrors stay in the broker process."
-	note "To build it: INSTALL_PROXY_VM=1 sudo $0"
-elif [ ! -x /opt/xentry/.venv-broker/bin/python ]; then
-	cat <<'EOF'
-
-      The broker virtualenv is missing, so the bring-up cannot render a
-      network or a domain XML. Run step 4 first (re-running this script is
-      harmless), then come back with INSTALL_PROXY_VM=1. Nothing was changed.
-EOF
+# NOT OPTIONAL. This was gated on INSTALL_PROXY_VM=1, default off, which left
+# a default install broken in a way nothing reported until a job ran:
+#
+#   broker/main.py:    proxy_ip = os.environ.get("XENTRY_PROXY_IP") or PROXY_VM_IP
+#   broker/runtime.py: PROXY_VM_IP = "10.44.0.2"
+#
+# proxy_ip is therefore NEVER empty. Every `if self.proxy_ip:` branch in the
+# runtime is taken - nine of them - and the two `if not self.proxy_ip:` guards
+# are dead code. ADR 0002 removed the in-process mirrors; there is no value
+# that brings them back. So the broker addresses 10.44.0.2 over xentrywan0
+# whether or not that machine exists, and without it every job fails at
+# provision because the package mirrors are not there.
+#
+# The bring-up is idempotent and refuses to finish unless its own isolation
+# probe passes inside the VM, so re-running this step is safe and cheap.
+# There is no flag to skip this. An install without the VM is not a working
+# install, and a knob that produces a broken deployment is not a choice worth
+# offering - it only moves the failure to the first job, where it looks like a
+# provisioning bug instead of a missing machine.
+if [ ! -x "$APP/.venv-broker/bin/python" ]; then
+	die "the broker virtualenv is missing; re-run this script (step 4 builds it)"
 else
 	# A supported base: Ubuntu 24.04 ships the Python 3.12 the mirror code is
 	# written against, and its pool is still served. REBUILD=1 discards the

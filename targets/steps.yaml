@@ -365,19 +365,19 @@ steps:
     user: root
   setup-dirtyfrag:
     params:
-    - mirror_url
+    - proxy_url
     - kernel_artifact_id
     - kernel_sha256
     - kernel_modules_artifact_id
     - kernel_modules_sha256
     required:
-    - mirror_url
+    - proxy_url
     - kernel_artifact_id
     - kernel_sha256
     - kernel_modules_artifact_id
     - kernel_modules_sha256
     script: dirtyfrag/setup.sh
-    sha256: e16bd9931ebd317fa89007fd3fa26c50ea412bae0c0fa7dce1061d68c74a9ef5
+    sha256: e35ffd473f18b8debaeb1a8db6125aff9553dd6828615743209ec22436a4aeed
     timeout_s: 1200
     tty: false
     user: root
@@ -430,15 +430,15 @@ steps:
     user: root
   setup-gitlab:
     params:
-    - mirror_url
+    - proxy_url
     - gitlab_artifact_id
     - gitlab_sha256
     required:
-    - mirror_url
+    - proxy_url
     - gitlab_artifact_id
     - gitlab_sha256
     script: gitlab/setup.sh
-    sha256: c1a04ef4c9d769c6b0fca18de7d35a83b852fb55c4045931f9a297b7d592a164
+    sha256: ba8aee0348e72c10b2a01694ba7e5049aa6830783ba6c977d644ca317beb8bfa
     timeout_s: 1800
     tty: false
     user: root
@@ -470,15 +470,15 @@ steps:
     user: root
   setup-php:
     params:
-    - mirror_url
+    - proxy_url
     - php_artifact_id
     - php_sha256
     required:
-    - mirror_url
+    - proxy_url
     - php_artifact_id
     - php_sha256
     script: php2shell/setup.sh
-    sha256: ad7c2a33bbfd96915069ff3bf627ac20b24db020a12626345fb2d27842c9f864
+    sha256: b5c403ae9bf7a61c74bc3d34b0c6a475e5a6b6496a12cd18b90da6a3a9fc57b2
     timeout_s: 1800
     tty: false
     user: root

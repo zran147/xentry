@@ -77,20 +77,31 @@ reading but optional.
 | 8 | systemd units and the services |
 | 9 | AppArmor deny rules and the deployment verifier |
 | 10 | optional: serve on a routable address |
-| 11 | optional: the mirror VM |
+| 11 | the proxy VM |
 | 12 | optional: developer access |
 | 13 | first job |
 
 **`DEV=1` makes the installed tree editable** instead of root-owned, which is
 what you want when the loop is change the code, restart, look, change again.
-It puts `src/`, `tests/`, `broker/` and `targets/` in a new `xentry-dev` group,
-group-writable and setgid so later files inherit the group, and grants two
-narrow `sudo` rules: restarting the two services, and `/usr/local/sbin/xentry-read`
-for read-only diagnostics. It does **not** touch `/etc/xentry`,
-`/var/lib/xentry` or either virtualenv, so `app.env` stays `640 root:xentry`
-and a developer still cannot read the API key. Group membership needs a new
-login shell; until then, `sg xentry-dev -c '<command>'` works in the current
-one.
+It is step 12, and it does four things:
+
+- Puts `src/`, `tests/`, `broker/` and `targets/` in a new `xentry-dev` group,
+  group-writable and setgid so files created later inherit the group rather
+  than reverting to root-only.
+- Adds the invoking user (`$SUDO_USER`, or `DEV_USER=`) to that group.
+- Grants two narrow `sudo` rules: restarting the two services, and
+  `/usr/local/sbin/xentry-read` for read-only diagnostics. Each is parsed
+  before it is installed and the whole sudo configuration is re-parsed after,
+  because a malformed file in `/etc/sudoers.d` can make `sudo` refuse every
+  command.
+- Lets `XENTRY_ADMIN_IPS` be empty: the app's port then accepts **any** source
+  address instead of refusing to publish. The install says so in full when it
+  happens, because the app has no authentication.
+
+It does **not** touch `/etc/xentry`, `/var/lib/xentry` or either virtualenv, so
+`app.env` stays `640 root:xentry` and a developer still cannot read the API
+keys. Group membership needs a new login shell; until then `sg xentry-dev -c
+'<command>'` works in the current one.
 
 To take a host back to before step 1, `uninstall.sh` is the inverse: it removes
 the services, the tree, the state, the VMs, the networks, the nftables tables,
@@ -102,7 +113,7 @@ until the key is in place - a half-configured service that fails on its first
 job is worse than one that was never started. The next section is what each
 variable in that file means.
 
-Two optional steps are off unless you ask for them, and say so when skipped:
+Two steps are off unless you ask for them, and say so when skipped:
 
 ```bash
 sudo XENTRY_BIND_ADDR=192.168.137.10 XENTRY_ADMIN_IPS="10.0.0.5" /opt/xentry/install.sh
@@ -161,9 +172,15 @@ XENTRY_POC_ATTEMPTS=3
 `llama.cpp` ignores the key but litellm requires one to be present. Leaving
 `XENTRY_POC_MODEL` empty disables the tab, which is a valid state.
 
-`XENTRY_NVD_API_KEY` is optional and raises NVD's rate limit from 5 requests
-per 30 seconds to 50. It is sent only to `services.nvd.nist.gov`, checked at
-every redirect hop.
+Two optional API keys raise rate limits, and each is sent only to its own
+host, checked at every redirect hop. `XENTRY_NVD_API_KEY` takes NVD from 5
+requests per 30 seconds to 50. `XENTRY_GITHUB_TOKEN` matters more: GitHub
+allows 60 requests an hour **per address** unauthenticated and every check
+spends one listing the PoC repository, so a sweep of sixty CVEs exhausts it —
+and each check after that reads an empty listing, which the extractor reports
+as "the PoC text does not name a file that runs the exploit". That is a
+verdict about content for a file list it never read, so the failure does not
+look like a rate limit. A fine-grained token with no scopes raises it to 5,000.
 
 The broker has its own file, `/etc/xentry/broker.env`, mode `0600` and
 `root:root`. `install.sh` writes it and there is nothing in it you need to
@@ -177,18 +194,29 @@ port may `GET /`, receive the token cookie, and `POST /api/jobs`. Submitting a
 job detonates a real exploit in a VM on this host, and the evidence API serves
 every stored artifact. Treat the listening socket as the access boundary.
 
-Step 10 of `install.sh` does it only when you name both the address and the
-clients allowed to reach it:
+**This is a bind, not a Host-header question.** Adding an address to
+`XENTRY_ALLOWED_HOSTS` does not publish the app: the listen address lives in
+the unit's `ExecStart`, and with it unset nothing on the network can reach the
+port to have its `Host` checked at all.
 
-```bash
-sudo XENTRY_BIND_ADDR=192.168.137.10 XENTRY_ADMIN_IPS="10.0.0.5 10.0.0.6" \
-  ./install.sh
+Both settings live in `app.env`, and step 7 stops for them along with the API
+key:
+
+```text
+XENTRY_BIND_ADDR=192.168.137.10
+XENTRY_ADMIN_IPS=10.0.0.5 10.0.0.6
 ```
 
-It overrides the bind with `/etc/systemd/system/xentry.service.d/10-bind.conf`
-rather than editing the shipped unit, puts the address in
-`XENTRY_ALLOWED_HOSTS`, and runs `scripts/install-webfilter.sh` with the
-addresses you listed.
+Step 10 then overrides the bind with
+`/etc/systemd/system/xentry.service.d/10-bind.conf` rather than editing the
+shipped unit, adds the address to `XENTRY_ALLOWED_HOSTS`, and runs
+`scripts/install-webfilter.sh` with the sources you listed. Passing either as
+an environment variable still works for a one-off and wins over the file.
+
+Leaving `XENTRY_ADMIN_IPS` empty **refuses** to publish — except under `DEV=1`,
+where it means `0.0.0.0/0` and the install says so in full. That is a
+development convenience and nothing else: it puts an unauthenticated port on
+every network this host is attached to.
 
 The filter it installs is a separate nftables table from the broker's, which
 the broker deletes and re-adds on every job phase; this one it never touches.
@@ -199,7 +227,7 @@ Binding to the routable address alone means `127.0.0.1:8000` is no longer
 listening; reach the app at the address in the drop-in. Deleting the drop-in
 and running `daemon-reload` plus `restart xentry` returns the app to loopback.
 
-### The mirror VM
+### The proxy VM
 
 The five package mirrors — apt snapshot, registry, OCI — used to run inside the
 broker process, as root on the host, bound to each job network's gateway.
@@ -209,10 +237,24 @@ connection to a root process on this host. Step 11 of `install.sh` builds it;
 [`deploy/proxy-vm/README.md`](deploy/proxy-vm/README.md) is what each piece
 refuses to do and the failures that shaped it.
 
-Two values address it, and `install.sh` writes both into `broker.env`:
+**One machine, two names.** The proxy VM and the proxy VM are the same thing.
+The code and paths say proxy — `deploy/proxy-vm/`, `scripts/proxy-vm-up.sh`,
+`XENTRY_PROXY_IP` — while the unit and these docs say mirror
+(`xentry-proxy.service`). Nothing switches on the difference.
+
+**It is not optional.** `install.sh` builds it on every run, and
+`SKIP_PROXY_VM=1` is the opt-out rather than a flag to opt in. The broker
+addresses `10.44.0.2` over `xentrywan0` whether or not that machine exists:
+`proxy_ip` falls back to the constant `PROXY_VM_IP` and is never empty, so all
+nine `if self.proxy_ip:` branches in the runtime are taken and the two
+`if not self.proxy_ip:` guards are unreachable. Without the VM there are no
+package mirrors, and every job fails at provision. The bring-up is idempotent
+and refuses to finish unless its isolation probe passes inside the VM, so
+re-running the step costs little.
+
+One value addresses it, and `install.sh` writes it into `broker.env`:
 
 ```text
-XENTRY_WAN_BRIDGE=xentrywan0
 XENTRY_PROXY_IP=10.44.0.2
 ```
 
@@ -231,6 +273,23 @@ sudo /opt/xentry/scripts/proxy-vm-doctor.sh
 sudo ssh -i /etc/xentry/proxy-vm.key root@10.44.0.2 \
   'nft list table inet xentry_phase; journalctl -u dnsmasq -n 30 --no-pager'
 ```
+
+## Services
+
+Four on the host, two inside the proxy VM.
+
+| unit | runs as | what it does |
+|---|---|---|
+| `xentry.service` | `xentry` | The web app: UI, JSON API, evidence and audit bundles. Unprivileged and owns no VM; everything it needs done it asks the broker for. Binds `127.0.0.1` unless `XENTRY_BIND_ADDR` says otherwise. |
+| `xentry-broker.service` | `root` | The only thing that touches libvirt, nftables, QEMU and the job directories. Listens on `/run/xentry/broker.sock`, and `SO_PEERCRED` decides who may call. Accepts 27 named verbs and nothing else. |
+| `xentry-wan-firewall.service` | `root` | The permanent host rules for the proxy VM's bridge: `table inet xentry_wan`. Re-applied at boot, because a bridge with no filter is a guest with a route to your network. |
+| `xentry-webfilter.service` | `root` | Re-applies `table inet xentry_admin` at boot — the source allowlist for the app's port. Installed only when `XENTRY_BIND_ADDR` publishes the app. |
+| `xentry-proxy.service` | `root`, in the VM | The package proxies for one job: apt snapshot, registry (npm/PyPI), OCI. This is why the VM exists — a guest fetching a package no longer opens a connection to a root process on the host. |
+| `xentry-job-nics.service` | `root`, in the VM | Addresses the job bridges inside the VM and serves DHCP on them. |
+
+The two host firewall tables never overlap: `xentry_wan` hooks `forward` and is
+rebuilt per job phase, `xentry_admin` hooks `input` and the broker never
+touches it.
 
 ## VM confinement
 
@@ -285,7 +344,7 @@ claim.
   targets/                checked-in step scripts, digests in steps.yaml
   config/                 artifact and image catalogues
   deploy/                 systemd units, AppArmor profile
-  deploy/proxy-vm/        what is deployed INTO the mirror VM, and the host
+  deploy/proxy-vm/        what is deployed INTO the proxy VM, and the host
                           firewall: serve.py, rulesets, units, phase renderer,
                           isolation probe. Outside src/ and broker/ so the VM's
                           code does not compete for the line budget with the
@@ -302,7 +361,7 @@ claim.
 /etc/xentry/              755 root:xentry
   app.env                 0640 root:xentry  - the app's settings and the key
   broker.env              0600 root:root    - the broker's settings
-  proxy-vm.key            the mirror VM's ssh key
+  proxy-vm.key            the proxy VM's ssh key
 
 /var/lib/xentry/          751 xentry:xentry - production state
   xentry.db               the SQLite index

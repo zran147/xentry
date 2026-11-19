@@ -12,7 +12,7 @@ from pathlib import Path
 
 import asyncssh
 
-# The mirror VM every guest command is tunnelled through (ADR 0002).
+# The proxy VM every guest command is tunnelled through (ADR 0002).
 # XENTRY_SSH_JUMP="" disables it, which is how the smoke scripts reach a
 # guest on a network this host still has an address on. The key path does
 # not vary - the bring-up writes it - so it is a constant, not an override.
@@ -66,7 +66,7 @@ class SSHTransport:
         self.jump = os.environ.get("XENTRY_SSH_JUMP", JUMP_HOST)
 
     async def _connect(self) -> asyncssh.SSHClientConnection:
-        # THROUGH the mirror VM, so this host needs no route to a job subnet.
+        # THROUGH the proxy VM, so this host needs no route to a job subnet.
         #
         # %h AND %p ARE NOT SUBSTITUTED HERE, so the host and port are
         # interpolated directly. asyncssh stores proxy_command as a token list

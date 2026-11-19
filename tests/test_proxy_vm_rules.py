@@ -1,4 +1,4 @@
-"""Host rules for the mirror VM (ADR 0002, stage 1).
+"""Host rules for the proxy VM (ADR 0002, stage 1).
 
 These are pure string builders, so they can be checked exactly - which is
 worth doing, because the failure mode of one wrong line is a VM with a quiet
@@ -150,7 +150,7 @@ def test_without_a_proxy_vm_the_old_shape_is_unchanged() -> None:
     """
     rules = provisioning_rules(bridge=JOB, apt_port=8082, registry_port=8083)
     served = [line for line in _input(rules) if "tcp dport" in line]
-    assert len(served) == 3, served          # mirror_port, apt, registry
+    assert len(served) == 3, served          # proxy_port, apt, registry
     assert WAN not in rules
     assert PRIVATE not in rules
     for line in served:
@@ -158,7 +158,7 @@ def test_without_a_proxy_vm_the_old_shape_is_unchanged() -> None:
 
 
 def test_there_is_no_longer_a_way_back_to_the_host_mirrors() -> None:
-    """The switch is gone. The mirror VM is the only path.
+    """The switch is gone. The proxy VM is the only path.
 
     proxy_ip defaulted to "" while the mirrors still ran on the host, so the
     OLD path was what actually ran unless an environment variable said
@@ -177,10 +177,11 @@ def test_there_is_no_longer_a_way_back_to_the_host_mirrors() -> None:
 
     assert 'PROXY_VM_IP = "10.44.0.2"' in runtime_src
     assert "proxy_ip: str = PROXY_VM_IP" in runtime_src
-    assert "wan_bridge: str = PROXY_VM_BRIDGE" in runtime_src
     # `or`, not a bare default: an empty value must not select the host path.
     assert 'os.environ.get("XENTRY_PROXY_IP") or PROXY_VM_IP' in main_src
-    assert 'os.environ.get("XENTRY_WAN_BRIDGE") or PROXY_VM_BRIDGE' in main_src
+    # XENTRY_WAN_BRIDGE is gone. It reached only the rule builders, which the
+    # runtime no longer calls; the bridge name is fixed in host-wan.nft.
+    assert "XENTRY_WAN_BRIDGE" not in main_src
     assert 'os.environ.get("XENTRY_PROXY_IP", "")' not in main_src
     import pathlib
 
@@ -192,19 +193,33 @@ def test_there_is_no_longer_a_way_back_to_the_host_mirrors() -> None:
         line for line in runtime_src.splitlines()
         if not line.strip().startswith("#")
     )
-    for gate in ("self.start_mirror and not self.proxy_ip",
+    # These were once gates - `start_mirror and not self.proxy_ip` and three
+    # like it - which proved the old path could not run. The gated code has
+    # since been deleted outright, which is the stronger statement: there is no
+    # host-side mirror to fall back to, gated or otherwise.
+    for gone in ("self.start_mirror and not self.proxy_ip",
                  "self.start_apt_proxy and not self.proxy_ip",
                  "self.start_oci_mirror and not self.proxy_ip",
-                 "self.start_registry_proxy and registry_cutoff and not self.proxy_ip"):
-        assert gate in code, gate
-    assert "wan_bridge=self.wan_bridge" in code
-    assert code.count("proxy_ip=self.proxy_ip") >= 2
+                 "self.start_registry_proxy and registry_cutoff and not self.proxy_ip",
+                 # and the constructors those gates guarded
+                 "ArtifactMirror(",
+                 "AptSnapshotProxy(",
+                 "OciMirror(",
+                 "RegistryProxy("):
+        assert gone not in code, f"the host-side path is back: {gone}"
+    # wan_bridge was only ever passed to those rule builders, so removing them
+    # left XENTRY_WAN_BRIDGE read by nothing. The bridge name is fixed in
+    # deploy/proxy-vm/host-wan.nft, which is a static ruleset.
+    assert "self.wan_bridge" not in code
+    assert "XENTRY_WAN_BRIDGE" not in (
+        pathlib.Path(__file__).resolve().parents[1] / "broker/main.py"
+    ).read_text()
 
 
 def test_a_mirror_vm_that_will_not_come_up_fails_the_job() -> None:
     """Carrying on would reproduce a CVE against the wrong archive.
 
-    The mirror VM is persistent, so a failed reconfiguration leaves it holding
+    The proxy VM is persistent, so a failed reconfiguration leaves it holding
     the PREVIOUS job's serial. Serving that silently is the worst outcome
     available: the job would pass, against packages dated to someone else's
     advisory.
@@ -217,9 +232,9 @@ def test_a_mirror_vm_that_will_not_come_up_fails_the_job() -> None:
     body = runtime[runtime.index("def configure_mirror_vm") : runtime.index("def _cleanup_network")]
 
     assert "if not self.proxy_ip:" in body and "return" in body
-    assert body.count('BrokerError(\n                "mirror_vm_unconfigured"') == 2
+    assert body.count('BrokerError(\n                "proxy_vm_unconfigured"') == 2
     # The journal is carried into the failure, not left on the VM.
-    assert "journalctl -u xentry-mirror.service" in body
+    assert "journalctl -u xentry-proxy.service" in body
     assert "install -D -m 0644 /dev/stdin /etc/xentry-mirror/job.json" in body
 
     # Configuration goes over ssh, never a port a guest could reach. The ssh
@@ -340,7 +355,7 @@ def test_the_vm_side_refuses_to_serve_an_unpinned_archive() -> None:
     assert "tcp dport 22 accept" not in inp, inp
 
     # The unit will not start without the filter loaded.
-    unit = (root / "xentry-mirror.service").read_text()
+    unit = (root / "xentry-proxy.service").read_text()
     assert "Requires=nftables.service" in unit
     assert "[Install]" in unit
 
@@ -355,7 +370,7 @@ def test_the_host_keeps_permanent_rules_for_that_bridge() -> None:
 
     runtime.py applies the `xentry` table in create_network and clears it in
     cleanup, so between jobs it does not exist - and the rule that stops the
-    mirror VM reaching this host lived in it. The VM is persistent and has
+    proxy VM reaching this host lived in it. The VM is persistent and has
     internet access, so for most of its life nothing on the host stood
     between it and port 8000, where the app answers without authentication.
 
@@ -478,7 +493,7 @@ def test_the_phases_move_into_the_mirror_vm() -> None:
     # Locked: no tcp to the VM at all, as an explicit drop.
     assert "meta l4proto tcp drop" in code
     # Locked: one path between the guests, by address and port.
-    assert 'ip saddr ${ATTACKER} ip daddr ${TARGET} tcp dport ${TPORTS} accept' in code
+    assert 'ip saddr ${JOBS} ip daddr ${JOBS} accept' in code
     # And nothing else leaves a job subnet - no internet for a guest.
     assert 'ip saddr ${JOBS} drop' in code
     # Scoped by subnet, never by interface name: names depend on PCI slots and
@@ -493,7 +508,7 @@ def test_the_phases_move_into_the_mirror_vm() -> None:
     assert "if not self.proxy_ip:" in body          # off until cutover
     assert "/etc/xentry-mirror/phase.json" in body
     assert "/opt/xentry-mirror/phase.sh" in body
-    assert body.count("mirror_vm_unconfigured") == 2
+    assert body.count("proxy_vm_unconfigured") == 2
 
 
 def test_a_job_bridge_has_no_address_on_this_host() -> None:
@@ -501,7 +516,7 @@ def test_a_job_bridge_has_no_address_on_this_host() -> None:
 
     network_xml with no gateway builds a bridge with no <ip> element at all:
     no address for the host, and therefore no dnsmasq and no route. The guests'
-    only neighbour is the mirror VM.
+    only neighbour is the proxy VM.
     """
     from broker.libvirt_ops import network_xml
 
@@ -559,7 +574,7 @@ def test_the_mirrors_are_unreachable_while_the_poc_runs() -> None:
     This is the property the whole phase model exists for: evidence that a
     PoC worked has to mean the PoC worked, not that it downloaded something
     mid-run. The host enforced it while it had an address on the guests'
-    bridge; in stage 2 the mirror VM enforces it, and the rule is stronger
+    bridge; in stage 2 the proxy VM enforces it, and the rule is stronger
     than the one it replaces - ALL tcp from either guest subnet to the VM is
     dropped, not merely the five mirror ports.
 
@@ -592,7 +607,7 @@ def test_the_mirrors_are_unreachable_while_the_poc_runs() -> None:
                 "target_ip": "10.43.1.10",
                 "attacker_ip": "10.43.2.20",
                 "target_ports": [8080],
-                "mirror_ports": [80, 8082, 8083, 8084, 8086],
+                "proxy_ports": [80, 8082, 8083, 8084, 8086],
             }))
             done = subprocess.run(
                 ["bash", str(dry)], capture_output=True, text=True, check=False
@@ -602,14 +617,20 @@ def test_the_mirrors_are_unreachable_while_the_poc_runs() -> None:
 
     jobs = "{ 10.43.1.0/24, 10.43.2.0/24 }"
 
-    # During the PoC run: no tcp to the mirror VM from either subnet.
+    # During the PoC run: no tcp to the proxy VM from either subnet.
     locked = rendered["locked"]
     assert f"ip saddr {jobs} meta l4proto tcp drop" in locked
     # And no port-specific accept that would undo it.
     assert "8082 } accept" not in locked
     assert "tcp dport { 80," not in locked
-    # The one permitted path is the attacker to the target's declared port.
-    assert "ip saddr 10.43.2.20 ip daddr 10.43.1.10 tcp dport { 8080 } accept" in locked
+    # The two guests may talk to each other without restriction, both ways.
+    # It used to be attacker -> target on the declared tcp ports only, which
+    # silently decided which CVEs could reproduce: a reverse shell is a NEW
+    # connection FROM the target and was dropped, and so was every callback an
+    # exploit uses to prove itself. Both machines are sacrificial and already
+    # cut off from the host, this VM and the internet by the drop below, so the
+    # restriction bought nothing and cost a whole class of PoC.
+    assert f"ip saddr {jobs} ip daddr {jobs} accept" in locked
     # Nothing else leaves a guest subnet at all - no internet, no host.
     assert f"ip saddr {jobs} drop" in locked
 
@@ -683,7 +704,7 @@ def test_the_runtime_uses_the_island_bridges_when_a_mirror_vm_is_configured() ->
     assert 'target_ip="10.43.1.10"' in layout
     assert 'attacker_ip="10.43.2.20"' in layout
     assert "octet=0" in layout, "the pool must not be consulted"
-    assert 'mirror_url=f"http://{proxy_ip}:{mirror_port}"' in layout
+    assert 'proxy_url=f"http://{proxy_ip}:{proxy_port}"' in layout
 
     # 3. a bridge per role, so the VM can route between them
     vm = code[code.index("def _create_vm") : code.index("def _cleanup_vm_files")]
@@ -698,13 +719,20 @@ def test_the_runtime_uses_the_island_bridges_when_a_mirror_vm_is_configured() ->
     # 5. both phases are pushed to the VM instead of applied here
     assert code.count('self.set_phase(') == 2
     locked = code[code.index('self.set_phase(\n                "locked"') :][:600]
-    # No mirror_ports in the locked call: phase.sh reads their absence as
+    # No proxy_ports in the locked call: phase.sh reads their absence as
     # "drop all tcp from either guest subnet", which is what closes the
     # mirrors to BOTH guests while the PoC runs.
-    assert "mirror_ports" not in locked
-    assert "target_ports=tuple(ports)" in locked
-    # And the host's own locked rules are now the else-branch.
-    assert "elif self.apply_nft:" in code
+    assert "proxy_ports" not in locked
+    # target_ports went with the narrow cross rule: phase.sh reads only the
+    # phase and the proxy ports now, so sending the declared ports described a
+    # policy that no longer exists.
+    # The kwarg, not the word: the call still RETURNS "target_ports" to its
+    # caller, which is the broker reporting what it locked.
+    assert "target_ports=" not in locked
+    # The host has no locked rules of its own any more: that else-branch and
+    # its call to locked_rules were deleted with the non-proxy path.
+    assert "elif self.apply_nft:" not in code
+    assert "locked_rules" not in code
 
 
 def test_the_guest_urls_point_at_the_mirror_vm() -> None:
@@ -725,7 +753,7 @@ def test_the_guest_urls_point_at_the_mirror_vm() -> None:
     code = "\n".join(l for l in runtime.splitlines() if not l.strip().startswith("#"))
     block = code[code.index('base = f"http://{self.proxy_ip}"') :][:1400]
 
-    for name in ("mirror_url", "apt_proxy_url", "attacker_apt_proxy_url",
+    for name in ("proxy_url", "apt_proxy_url", "attacker_apt_proxy_url",
                  "registry_proxy_url", "oci_mirror_url"):
         assert f"{name} = f\"{{base}}:" in block or f"{name} = (" in block, name
     assert "container_apt_host = self.proxy_ip" in block
@@ -793,18 +821,12 @@ def test_the_host_installs_no_per_job_table_in_stage_two() -> None:
     ).read_text()
     code = "\n".join(l for l in runtime.splitlines() if not l.strip().startswith("#"))
 
-    # The provisioning apply is gated.
-    assert "if self.apply_nft and not self.proxy_ip:" in code
-    # And the locked one was already an elif behind set_phase.
-    assert "elif self.apply_nft:" in code
-    # So neither rule builder is reachable with a mirror VM configured.
-    applies = [
-        line.strip() for line in code.splitlines()
-        if "self.nft.apply(" in line
-    ]
-    assert len(applies) == 2, applies
-    for guard in ("if self.apply_nft and not self.proxy_ip:", "elif self.apply_nft:"):
-        assert guard in code
+    # Both applies used to be gated behind `not self.proxy_ip`. The gated code
+    # is gone, so the runtime cannot install a per-job table at all: it has no
+    # call to nft.apply and no reference to either rule builder left.
+    assert "self.nft.apply(" not in code, "the host installs a per-job table again"
+    for builder in ("provisioning_rules", "locked_rules"):
+        assert builder not in code, f"{builder} is reachable from the runtime again"
     # The phases go to the VM instead, twice.
     assert code.count("self.set_phase(") == 2
 
@@ -893,7 +915,7 @@ def test_the_guest_address_is_known_not_discovered() -> None:
 
         no DHCP lease for 52:54:00:00:00:10 on xentry-target
 
-    which would have kept failing with the mirror VM serving leases
+    which would have kept failing with the proxy VM serving leases
     perfectly - the lease exists, in the VM's dnsmasq, where libvirt cannot
     see it.
 
@@ -1229,12 +1251,12 @@ def test_the_attacker_mirror_is_ubuntu_and_unpinned() -> None:
     # which is the guarantee this must not weaken.
     assert "refusing to serve: job.json names no serial or no archive" in serve
 
-    # The host's own choice, so the two paths cannot drift apart silently.
+    # There is no host-side apt proxy left to drift from: the block that built
+    # one was deleted with the non-proxy path, so serve.py's choice above is
+    # the only one that exists.
     runtime = (root / "broker/runtime.py").read_text()
-    block = runtime[runtime.index("port=self.attacker_apt_port"):][:200]
-    assert "serial=None" in block
-    assert 'archive="ubuntu"' in block
-
+    assert "port=self.attacker_apt_port" not in runtime
+    assert "AptSnapshotProxy(" not in runtime
 
 def test_the_lock_does_not_cut_the_brokers_control_channel() -> None:
     """copy_poc runs after lock_network, and the lock dropped its ssh.
@@ -1304,7 +1326,7 @@ def test_the_island_net_is_not_rebuilt_from_a_stored_octet() -> None:
     body = body[: body.index("\n    def ", 1)]
     # The island check comes FIRST, before anything reads the stored octet.
     assert "if self.proxy_ip:" in body
-    assert "return JobNet.for_mirror_vm(self.mirror_port, self.proxy_ip)" in body
+    assert "return JobNet.for_mirror_vm(self.proxy_port, self.proxy_ip)" in body
     assert body.index("if self.proxy_ip:") < body.index('state.get("octet")')
 
     # The phase rules are fed from a net, which is what this fixes.
@@ -1507,7 +1529,7 @@ def test_nothing_still_points_at_the_retired_broker_tree() -> None:
     scripts/proxy-vm-up.sh had BROKER=/opt/xentry-broker as a plain
     assignment - not overridable - and three inlined Python blocks doing
     sys.path.insert(0, "/opt/xentry-broker"). Collapsing the two trees deleted
-    that directory, so the mirror VM's bring-up could no longer render a
+    that directory, so the proxy VM's bring-up could no longer render a
     network or a domain XML. Nothing caught it: it was found while rewriting
     the README against the new layout, which is luck rather than process.
 
@@ -1603,3 +1625,133 @@ def test_no_shell_script_ends_a_pipeline_in_grep_q_under_pipefail() -> None:
         "pipeline ends in grep -q under pipefail (use grep -c and compare): "
         + ", ".join(offenders)
     )
+
+
+def test_install_does_not_treat_the_mirror_vm_as_optional() -> None:
+    """The broker addresses the VM whether or not it was built.
+
+    broker/main.py resolves `proxy_ip` as `os.environ.get("XENTRY_PROXY_IP") or
+    PROXY_VM_IP`, and PROXY_VM_IP is the constant "10.44.0.2". It is therefore
+    never empty: every `if self.proxy_ip:` branch in the runtime is taken and
+    the `if not self.proxy_ip:` guards cannot be reached from the deployed
+    configuration. ADR 0002 removed the in-process mirrors and left no value
+    that brings them back.
+
+    So an install that skips the VM produces a broker pointed at a machine that
+    does not exist, and every job fails at provision for want of a package
+    mirror. The step was gated on INSTALL_PROXY_VM=1, default off, which made
+    that the DEFAULT outcome. Building it is the default now; SKIP_PROXY_VM=1
+    is the opt-out.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    install = (root / "install.sh").read_text()
+    code = "\n".join(l for l in install.splitlines() if not l.strip().startswith("#"))
+
+    assert 'step "the proxy VM"' in code, "step 11 is labelled optional again"
+    # No gate at all, in either direction. A flag that produces a deployment
+    # which cannot run a job is not a choice worth offering: it only moves the
+    # failure to the first job, where a missing machine looks like a
+    # provisioning bug.
+    assert "INSTALL_PROXY_VM" not in code, "the opt-in gate is back"
+    assert "SKIP_PROXY_VM" not in code, "an opt-out was added"
+
+    # And the reason it is mandatory must still hold in the broker.
+    main = (root / "broker/main.py").read_text()
+    assert 'os.environ.get("XENTRY_PROXY_IP") or PROXY_VM_IP' in main
+    runtime = (root / "broker/runtime.py").read_text()
+    assert 'PROXY_VM_IP = "10.44.0.2"' in runtime
+
+
+def test_the_host_no_longer_runs_any_package_service() -> None:
+    """Six tests were deleted with the code they covered. This is what they said.
+
+    They asserted that the broker started an ArtifactMirror, an
+    AptSnapshotProxy, an OciMirror and a RegistryProxy on this host, bound to
+    each job network's gateway, and installed a per-job nftables table to
+    police them. All four were gated behind `not self.proxy_ip`, and proxy_ip
+    defaults to the constant 10.44.0.2, so none of it could run - it was a
+    second implementation of the same job kept alive only by its tests.
+
+    ADR 0002 moved those services into the proxy VM. deploy/proxy-vm/serve.py
+    runs the three proxies there, phase.sh holds the firewall, and the host
+    offers a guest nothing at all. What is asserted here is the absence: a
+    second path that cannot run is worse than no second path, because a reader
+    cannot tell which one a job used.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    runtime = (root / "broker/runtime.py").read_text()
+    code = "\n".join(l for l in runtime.splitlines() if not l.strip().startswith("#"))
+
+    for gone in ("ArtifactMirror", "AptSnapshotProxy(", "OciMirror(",
+                 "RegistryProxy(", "provisioning_rules", "locked_rules",
+                 "self.nft.apply("):
+        assert gone not in code, f"the host-side package path is back: {gone}"
+
+    # And the three that DO still exist run in the VM, not here.
+    serve = (root / "deploy/proxy-vm/serve.py").read_text()
+    for lives in ("AptSnapshotProxy", "OciMirror", "RegistryProxy"):
+        assert lives in serve, f"{lives} should still run inside the VM"
+
+
+def test_the_artifact_mirror_module_is_gone() -> None:
+    """broker/mirror.py served pinned artifacts from this host to a guest.
+
+    It bound each job network's gateway - the host's own address on that
+    bridge - which is the shape ADR 0002 exists to remove: a guest fetching a
+    package opened a connection to a root process on the orchestrator. The
+    proxy VM serves them now, and the only caller was behind
+    `start_mirror and not self.proxy_ip`, which could not be true.
+
+    Its 114 lines and its tests went with it. This asserts the module does not
+    quietly return, because a second way to serve artifacts is worse than one.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    assert not (root / "broker/mirror.py").exists()
+    assert not (root / "tests/test_mirror.py").exists()
+    # The three that DO serve packages live in the VM and are copied there.
+    up = (root / "scripts/proxy-vm-up.sh").read_text()
+    assert "for f in aptproxy ociproxy registryproxy; do" in up
+
+
+def test_the_target_may_open_a_connection_back_to_the_attacker() -> None:
+    """A reverse shell is a NEW connection from the target, and it was dropped.
+
+    The locked phase permitted exactly one flow between the guests: attacker to
+    target, tcp, on the ports the target declared. `ct state
+    established,related` then covered the replies on that flow - but only that
+    flow. Anything the target initiated was caught by the drop:
+
+      * a reverse shell, which is the usual payload for an RCE
+      * Log4Shell's JNDI fetch, and every other callback an exploit uses to
+        prove it ran
+      * an XXE or SSRF probe
+
+    The PoC failed and the job reported that the exploit did not reproduce,
+    which is a verdict about the CVE for a packet the firewall ate.
+
+    Both guests are sacrificial, on island bridges with no host address, and
+    the drop below still cuts them off from this VM, the host and the internet.
+    The only thing the old rule restricted was the one conversation the job
+    exists to have.
+    """
+    import pathlib
+
+    script = (
+        pathlib.Path(__file__).resolve().parents[1] / "deploy/proxy-vm/phase.sh"
+    ).read_text()
+    code = "\n".join(l for l in script.splitlines() if not l.strip().startswith("#"))
+
+    # Symmetric: the match is subnet-to-subnet, so direction does not enter.
+    assert 'cross="    ip saddr ${JOBS} ip daddr ${JOBS} accept"' in code
+    # Not conditional on the phase, and not on the declared ports.
+    assert "tcp dport ${TPORTS}" not in code
+    assert '${ATTACKER} ip daddr ${TARGET}' not in code
+    # And the isolation that matters is untouched.
+    assert "ip saddr ${JOBS} drop" in code
+    assert "ip saddr ${JOBS} meta l4proto tcp drop" in code

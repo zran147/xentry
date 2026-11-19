@@ -104,3 +104,66 @@ def test_a_wheel_without_a_digest_or_over_http_is_refused() -> None:
     errors = module.validate(manifests, base)
     assert any("no https url" in error for error in errors)
     assert any("no sha256" in error for error in errors)
+
+
+def test_the_wheel_install_does_not_try_to_uninstall_an_apt_package() -> None:
+    """--ignore-installed, or the attacker image cannot be built at all.
+
+    The base image carries python3-urllib3 from apt. The pinned wheel list also
+    carries urllib3, so pip tried to replace the dpkg copy and refused:
+
+        ERROR: Cannot uninstall urllib3 2.0.7, RECORD file not found.
+        Hint: The package was installed by debian.
+
+    A dpkg-installed package has no RECORD file, so pip cannot uninstall it.
+    Under `set -euo pipefail` that killed the build 108 seconds in, after the
+    other seven images had already succeeded - the attacker image is the only
+    one that installs wheels.
+
+    --ignore-installed installs over it instead, which is what this list means
+    anyway: pip's /usr/local/lib/python3/dist-packages precedes apt's
+    /usr/lib/python3/dist-packages on sys.path, so the pinned wheel is the one
+    a PoC imports. --require-hashes still enforces every digest.
+    """
+    import importlib.util
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "build_images_probe", root / "scripts/build-images.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    rendered = module.wheel_commands(
+        [{"url": "https://example.invalid/urllib3-2.5.0-py3-none-any.whl",
+          "sha256": "ab" * 32}]
+    )
+    pip_line = next(l for l in rendered.splitlines() if l.startswith("pip3 install"))
+    assert "--ignore-installed" in pip_line, pip_line
+    # The digest check is the reason this list exists; it must not be traded away.
+    assert "--require-hashes" in pip_line, pip_line
+    assert "--no-deps" in pip_line, pip_line
+
+
+def test_the_image_build_can_be_pointed_at_an_apt_mirror() -> None:
+    """archive.ubuntu.com answering one request in two stalls every build.
+
+    Each image runs apt-get update inside itself against the base image's own
+    sources. When Canonical throttles, seven builds crawl for ten minutes each.
+    XENTRY_APT_MIRROR rewrites the guest's sources first.
+
+    sed -E and @ as the delimiter both matter: `?` is literal in a basic regex
+    so `https?://` matched nothing, and a `|` delimiter is closed by the `|`
+    inside the host alternation.
+    """
+    import pathlib
+
+    text = (
+        pathlib.Path(__file__).resolve().parents[1] / "scripts/build-images.py"
+    ).read_text()
+    code = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+    assert 'os.environ.get("XENTRY_APT_MIRROR"' in code
+    assert "sed -Ei" in code, "a basic regex cannot match https?://"
+    assert "sed -Ei 's@" in code, "a | delimiter is closed by the alternation"

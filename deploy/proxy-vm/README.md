@@ -1,4 +1,4 @@
-# The mirror VM
+# The proxy VM
 
 Everything here is deployed **into** the VM or onto the host's firewall, not
 run as part of the application. It sits outside `src/`, `broker/` and
@@ -9,7 +9,7 @@ code should not compete for budget with the application that commands it.
 |---|---|---|
 | `serve.py` | VM: `/opt/xentry-mirror/serve.py` | starts the five mirrors from `/etc/xentry-mirror/job.json` |
 | `firewall.nft` | VM: `/etc/nftables.conf` | the VM's own filter, the second of two layers |
-| `xentry-mirror.service` | VM: `/etc/systemd/system/` | one unit, started per job by the broker |
+| `xentry-proxy.service` | VM: `/etc/systemd/system/` | one unit, started per job by the broker |
 | `isolation-probe.sh` | VM: `/opt/xentry-mirror/` | proves the isolation; the only thing that decides whether a change worked |
 | `host-wan.nft` | **host**: `/etc/xentry/host-wan.nft` | the host's permanent rules for this VM's bridge |
 | `xentry-wan-firewall.service` | **host**: `/etc/systemd/system/` | loads those rules at boot, and the routes to the job subnets |
@@ -135,7 +135,7 @@ ip saddr { 10.42.1.0/24, 10.42.2.0/24 } meta l4proto tcp drop
 ```
 
 so while the PoC runs, neither the target nor the attacker can open a TCP
-connection to the mirror VM — not to the five mirror ports, not to anything.
+connection to the proxy VM — not to the five mirror ports, not to anything.
 The only path that phase opens is the attacker to the target's declared ports.
 The mirrors are also stopped, which is what makes the guarantee hold if a rule
 is ever wrong.

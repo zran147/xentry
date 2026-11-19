@@ -12,11 +12,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import httpx
 import pytest
 import yaml
 
-from broker.aptproxy import SNAPSHOT_SERIAL
 from broker.errors import BrokerError
 from broker.libvirt_ops import LibvirtError
 from broker.runtime import BrokerRuntime
@@ -91,9 +89,7 @@ def make_runtime(
     tmp_path: Path,
     *,
     manifest_path: Path | None = None,
-    start_mirror: bool = False,
-    mirror_bind: str = "10.42.0.1",
-    mirror_port: int = 8081,
+    proxy_port: int = 8081,
     start_apt_proxy: bool = False,
     apt_port: int = 8082,
 ) -> tuple[BrokerRuntime, FakeVirsh, FakeNft, Path]:
@@ -143,38 +139,17 @@ def make_runtime(
         virsh=virsh,
         nft=nft,
         manifest_path=manifest_path,
-        start_mirror=start_mirror,
-        mirror_bind=mirror_bind,
-        mirror_port=mirror_port,
+        proxy_port=proxy_port,
         start_apt_proxy=start_apt_proxy,
         apt_port=apt_port,
         # proxy_ip="" selects the LEGACY host-side path. Production cannot:
-        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # proxy_ip defaults to the proxy VM and main.py `or`s that default,
         # so no environment value re-enables this. These tests cover code
         # that is now unreachable from the real entry point, and they are
         # what will be deleted along with it.
         proxy_ip="",
     )
     return runtime, virsh, nft, image
-
-
-def test_create_and_destroy_network(tmp_path: Path) -> None:
-    runtime, virsh, nft, _ = make_runtime(tmp_path)
-    result = runtime.create_network("job-1", "isolated")
-    assert result["network_id"] == "xentry-job-1"
-    # Its own subnet, bridge and nftables table, so a second job can run.
-    assert result["mirror_url"] == "http://10.42.1.1:8081"
-    assert result["bridge"] == "xentry-1"
-    assert result["subnet"] == "10.42.1.0/24"
-    assert nft.tables[-1] == "xentry_1"
-    assert virsh.networks["xentry-job-1"] == "active"
-    assert "tcp dport 8081" in nft.rules[-1]
-    state = tmp_path / "data" / "jobs" / "job-1" / "network.json"
-    assert state.exists()
-    runtime.destroy_network("xentry-job-1")
-    assert "xentry-job-1" not in virsh.networks
-    assert nft.cleared == 1
-    assert not state.exists()
 
 
 def test_image_hash_is_verified(tmp_path: Path) -> None:
@@ -189,7 +164,7 @@ def test_image_hash_is_verified(tmp_path: Path) -> None:
         virsh=FakeVirsh(),
         nft=FakeNft(),
         # proxy_ip="" selects the LEGACY host-side path. Production cannot:
-        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # proxy_ip defaults to the proxy VM and main.py `or`s that default,
         # so no environment value re-enables this. These tests cover code
         # that is now unreachable from the real entry point, and they are
         # what will be deleted along with it.
@@ -367,43 +342,6 @@ def test_copy_in_guest_path_is_validated(tmp_path: Path) -> None:
     assert exc.value.code == "broker_registry_rejected"
 
 
-def test_runtime_starts_and_stops_mirror(tmp_path: Path) -> None:
-    payload = b"mirror payload"
-    artifact = tmp_path / "php.tar.xz"
-    artifact.write_bytes(payload)
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "artifacts": {
-                    "php-8.4.26-src": {
-                        "kind": "package",
-                        "path": str(artifact),
-                        "filename": "php.tar.xz",
-                        "sha256": hashlib.sha256(payload).hexdigest(),
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    runtime, _, _, _ = make_runtime(
-        tmp_path,
-        manifest_path=manifest,
-        start_mirror=True,
-        mirror_bind="127.0.0.1",
-        mirror_port=0,
-    )
-    result = runtime.create_network("job-1", "isolated")
-    assert result["mirror_started"] is True
-    # Mirrors are per job now.
-    assert "job-1" in runtime.mirrors
-    response = httpx.get(f"{result['mirror_url']}/artifacts/php-8.4.26-src", timeout=5.0)
-    assert response.content == payload
-    runtime.destroy_network("xentry-job-1")
-    assert "job-1" not in runtime.mirrors
-
-
 def test_destroy_vm_removes_job_keys_after_both_roles(tmp_path: Path) -> None:
     runtime, _, _, _ = make_runtime(tmp_path)
     job_dir = runtime.jobs_root / "job-1"
@@ -447,7 +385,7 @@ def test_each_job_gets_its_own_subnet(tmp_path: Path) -> None:
 
     assert first["subnet"] != second["subnet"]
     assert first["bridge"] != second["bridge"]
-    assert first["mirror_url"] != second["mirror_url"]
+    assert first["proxy_url"] != second["proxy_url"]
     assert {first["octet"], second["octet"]} == {1, 2}
     # Creating the second no longer tears the first down.
     assert virsh.networks["xentry-job-1"] == "active"
@@ -521,48 +459,6 @@ def test_concurrent_allocation_gives_distinct_subnets(tmp_path: Path) -> None:
 # ------------------------------------------------------- pinned apt mirror ---
 
 
-def test_without_the_apt_mirror_nothing_changes(tmp_path: Path) -> None:
-    runtime, _virsh, nft, _ = make_runtime(tmp_path)
-    result = runtime.create_network("job-1", "isolated")
-    assert result["apt_proxy_url"] == ""
-    assert result["apt_snapshot"] == ""
-    assert "8082" not in nft.rules[0]
-    assert runtime.apt_proxies == {}
-
-
-def test_the_apt_mirror_runs_per_job_and_is_reported(tmp_path: Path) -> None:
-    runtime, _virsh, nft, _ = make_runtime(
-        tmp_path, start_apt_proxy=True, mirror_bind="127.0.0.1", apt_port=0
-    )
-    result = runtime.create_network("job-1", "isolated")
-    try:
-        assert result["apt_proxy_url"].startswith("http://127.0.0.1:")
-        # The serial is reported so the runner can record what provisioned
-        # this target; a provision nobody can pin down cannot be repeated.
-        assert result["apt_snapshot"] == SNAPSHOT_SERIAL
-        assert "tcp dport 0 accept" not in nft.rules[0]  # a real port, not 0
-        assert list(runtime.apt_proxies) == ["job-1"]
-        # Bound and serving: the guest reaches a socket, not a config entry.
-        assert runtime.apt_proxies["job-1"]._server is not None
-    finally:
-        runtime.destroy_network("xentry-job-1")
-    assert runtime.apt_proxies == {}
-
-
-def test_a_second_call_reuses_the_running_mirror(tmp_path: Path) -> None:
-    runtime, _virsh, _nft, _ = make_runtime(
-        tmp_path, start_apt_proxy=True, mirror_bind="127.0.0.1", apt_port=0
-    )
-    first = runtime.create_network("job-1", "isolated")
-    try:
-        proxy = runtime.apt_proxies["job-1"]
-        second = runtime.create_network("job-1", "isolated")
-        assert runtime.apt_proxies["job-1"] is proxy
-        assert second["apt_proxy_url"] == first["apt_proxy_url"]
-    finally:
-        runtime.destroy_network("xentry-job-1")
-
-
 def test_the_catalog_is_re_read_when_it_changes(tmp_path: Path) -> None:
     """The app and the broker disagreed about the same file.
 
@@ -590,7 +486,7 @@ def test_the_catalog_is_re_read_when_it_changes(tmp_path: Path) -> None:
         image_dir=images,
         catalog_path=catalog,
         # proxy_ip="" selects the LEGACY host-side path. Production cannot:
-        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # proxy_ip defaults to the proxy VM and main.py `or`s that default,
         # so no environment value re-enables this. These tests cover code
         # that is now unreachable from the real entry point, and they are
         # what will be deleted along with it.
@@ -633,7 +529,7 @@ def test_ping_says_which_proxies_this_process_started(tmp_path: Path) -> None:
     runtime = BrokerRuntime(
         data_dir=tmp_path, image_dir=tmp_path / "images", start_oci_mirror=True,
         # proxy_ip="" selects the LEGACY host-side path. Production cannot:
-        # proxy_ip defaults to the mirror VM and main.py `or`s that default,
+        # proxy_ip defaults to the proxy VM and main.py `or`s that default,
         # so no environment value re-enables this. These tests cover code
         # that is now unreachable from the real entry point, and they are
         # what will be deleted along with it.
@@ -643,7 +539,8 @@ def test_ping_says_which_proxies_this_process_started(tmp_path: Path) -> None:
     assert answer["pong"] is True
     assert answer["oci_mirror"] is True
     assert set(answer) == {
-        "pong", "mirror", "apt_proxy", "registry_proxy", "oci_mirror",
+        # "mirror" is gone: the host starts no artifact mirror any more.
+        "pong", "apt_proxy", "registry_proxy", "oci_mirror",
         # The files THIS process reads, because both default to a path
         # relative to the broker's working directory and so can be a
         # different copy from the app's - which is what "image artifact is

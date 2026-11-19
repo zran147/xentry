@@ -620,7 +620,7 @@ def _allowed_uids() -> set[int]:
 
 
 def main() -> int:
-    from broker.runtime import PROXY_VM_BRIDGE, PROXY_VM_IP, BrokerRuntime
+    from broker.runtime import PROXY_VM_IP, BrokerRuntime
 
     socket_path = Path(os.environ.get("XENTRY_BROKER_SOCKET", "/run/xentry/broker.sock"))
     data_dir = Path(os.environ.get("XENTRY_DATA_DIR", "/var/lib/xentry"))
@@ -639,9 +639,7 @@ def main() -> int:
         # `or` the default, not just a default: an EMPTY value in the env file
         # used to mean "run the mirrors on the host", which is the path ADR
         # 0002 exists to remove. There is no longer a value that re-enables it.
-        wan_bridge=os.environ.get("XENTRY_WAN_BRIDGE") or PROXY_VM_BRIDGE,
         proxy_ip=os.environ.get("XENTRY_PROXY_IP") or PROXY_VM_IP,
-        start_mirror=os.environ.get("XENTRY_START_MIRROR", "1") != "0",
         # Off by default: it is reachable from a guest during provisioning, so
         # it is opted into per deployment rather than assumed.
         start_apt_proxy=os.environ.get("XENTRY_START_APT_PROXY", "0") != "0",

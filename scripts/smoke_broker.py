@@ -131,7 +131,7 @@ def main() -> int:
             f"out={exec_result['stdout']!r}"
         )
         if net.get("mirror_started"):
-            url = f"{net['mirror_url']}/artifacts/php-8.4.26-src"
+            url = f"{net['proxy_url']}/artifacts/php-8.4.26-src"
             rc, out, err = ssh(
                 root_key,
                 "root",

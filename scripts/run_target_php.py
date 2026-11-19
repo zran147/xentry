@@ -108,7 +108,7 @@ def main() -> int:
                 "vm_id": target_vm,
                 "step_id": "setup-php",
                 "params": {
-                    "mirror_url": net["mirror_url"],
+                    "proxy_url": net["proxy_url"],
                     "php_artifact_id": "php-8.4.26-src",
                     "php_sha256": artifacts["php-8.4.26-src"]["sha256"],
                 },

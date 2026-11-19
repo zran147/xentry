@@ -43,7 +43,7 @@ BROKER_PY="$BROKER/.venv-broker/bin/python"
 # files is exactly when you want to point it elsewhere.
 SRC="${SRC:-/opt/xentry}"
 IMAGES=/var/lib/xentry/images
-RUN=/var/lib/xentry/proxy-vm
+RUN=/var/lib/xentry/mirror-vm
 KEY=/etc/xentry/proxy-vm.key
 
 NET=xentry-wan
@@ -52,7 +52,7 @@ GATEWAY=10.44.0.1
 PROXY_IP=10.44.0.2
 MAC=52:54:00:4d:49:52          # "MIR"
 # ADR 0002 stage 2: one bridge for the target, one for the attacker,
-# neither with an address on this host. The mirror VM gets a NIC on each
+# neither with an address on this host. The proxy VM gets a NIC on each
 # and routes between them, carrying the phase rules the host used to.
 #
 # PERSISTENT and fixed, not per job, because gate G8 runs one job at a
@@ -221,7 +221,7 @@ from broker.libvirt_ops import network_xml
 
 name, bridge = sys.argv[1:3]
 # gateway="" -> no <ip> element at all: no address for this host, no dnsmasq,
-# no route. The mirror VM is the only thing on the bridge besides the guest.
+# no route. The proxy VM is the only thing on the bridge besides the guest.
 sys.stdout.write(
     network_xml(name=name, bridge=bridge, target_mac="", target_ip="",
                 gateway="")
@@ -409,7 +409,7 @@ ${APT_SOURCES}  # dhclient must not take the resolver DHCP offers: that is the h
   - path: /etc/xentry-mirror/README
     content: |
       job.json is written here by the broker before each job and read fresh on
-      every restart of xentry-mirror.service. serve.py refuses to start
+      every restart of xentry-proxy.service. serve.py refuses to start
       without a pinned snapshot serial.
 runcmd:
   - [ mkdir, -p, /opt/xentry-mirror/broker, /var/cache/xentry-mirror, /etc/xentry-mirror ]
@@ -455,8 +455,8 @@ sys.stdout.write(
         # through to a pty, which is why console.log stayed 0 bytes while
         # qemu reported 'char device redirected to /dev/pts/8'. runtime.py
         # passes both for every job VM; this did not.
-        serial_path=Path("/var/lib/xentry/proxy-vm/serial.log"),
-        serial_log_path=Path("/var/lib/xentry/proxy-vm/console.log"),
+        serial_path=Path("/var/lib/xentry/mirror-vm/serial.log"),
+        serial_log_path=Path("/var/lib/xentry/mirror-vm/console.log"),
     )
 )
 PYX
@@ -673,8 +673,8 @@ if [ "$STAGE2" = "1" ]; then
     "root@$PROXY_IP:/etc/systemd/system/xentry-job-nics.service"
   echo "  job-nics.sh, phase.sh, dnsmasq config, the unit"
 fi
-$SCP "$SRC/deploy/proxy-vm/xentry-mirror.service" \
-  "root@$PROXY_IP:/etc/systemd/system/xentry-mirror.service"
+$SCP "$SRC/deploy/proxy-vm/xentry-proxy.service" \
+  "root@$PROXY_IP:/etc/systemd/system/xentry-proxy.service"
 echo "  serve.py, the probe, the egress filter, the unit"
 
 echo
@@ -751,7 +751,7 @@ if [ "$STAGE2" = "1" ]; then
   # Start in the provisioning phase, which is the state a job begins in.
   echo "  loading the provisioning phase"
   $SSH "install -D -m 0644 /dev/stdin /etc/xentry-mirror/phase.json" <<JSON
-{"phase": "provisioning", "mirror_ports": [80, 8082, 8083, 8084, 8086]}
+{"phase": "provisioning", "proxy_ports": [80, 8082, 8083, 8084, 8086]}
 JSON
   if ! out=$(timeout 60 $SSH "/opt/xentry-mirror/phase.sh" 2>&1); then
     echo "  the phase rules did not load:" >&2
@@ -762,7 +762,7 @@ JSON
 fi
 # NOT enabled: with no job.json, serve.py refuses by design, and an enabled
 # unit would restart-loop against that refusal. The broker starts it per job.
-echo "  loaded; xentry-mirror.service installed but not enabled"
+echo "  loaded; xentry-proxy.service installed but not enabled"
 $SSH "nft list table inet xentry_mirror | head -20" | sed 's/^/    /'
 
 echo

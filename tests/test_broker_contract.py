@@ -299,29 +299,22 @@ def test_the_runtime_answers_every_verb_it_is_routed(tmp_path: Path) -> None:
         assert f'verb == "{verb}"' in source, f"runtime.handle has no branch for {verb}"
 
 
-def test_a_failed_network_create_leaves_no_service_running(tmp_path: Path) -> None:
-    """Three services start one after another, so a failure on the third used
-    to leave the first two bound to a gateway the same call then destroyed."""
+def test_the_host_starts_no_per_job_service_to_leak() -> None:
+    """Three services used to start one after another on this host, so a
+    failure on the third left the first two bound to a gateway address the same
+    call then destroyed - orphaned threads holding a port for the life of the
+    broker, with nothing to find them by.
+
+    They all moved into the proxy VM with ADR 0002. There is no per-job service
+    on this host to leak now, so the leak is not fixed, it is absent:
+    BrokerRuntime no longer has a dict that could hold one.
+    """
     from broker.runtime import BrokerRuntime
 
-    class Stub:
-        def __init__(self) -> None:
-            self.stopped = False
+    for attribute in ("mirrors", "apt_proxies", "registry_proxies",
+                      "oci_mirrors", "container_proxies", "attacker_proxies"):
+        assert attribute not in BrokerRuntime.__init__.__code__.co_names, attribute
 
-        def stop(self) -> None:
-            self.stopped = True
-
-    runtime = BrokerRuntime(
-        data_dir=tmp_path, image_dir=tmp_path / "images", apply_nft=False,
-        virsh=_FakeVirsh(), manifest_path=None,
-    )
-    services = [Stub(), Stub(), Stub()]
-    runtime.mirrors["j1"] = services[0]  # type: ignore[assignment]
-    runtime.apt_proxies["j1"] = services[1]  # type: ignore[assignment]
-    runtime.registry_proxies["j1"] = services[2]  # type: ignore[assignment]
-    runtime._cleanup_network("xentry-j1")
-    assert [item.stopped for item in services] == [True, True, True]
-    assert not runtime.mirrors and not runtime.apt_proxies and not runtime.registry_proxies
 
 
 class _FakeVirsh:

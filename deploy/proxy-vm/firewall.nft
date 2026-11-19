@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# The mirror VM's own filter (ADR 0002).
+# The proxy VM's own filter (ADR 0002).
 #
 # This is the SECOND of two layers and not the boundary. Root inside this VM
 # can flush this ruleset, which is why the host also drops everything arriving

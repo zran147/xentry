@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # GitLab CE 19.2.5 target setup. Runs as root in the target VM.
-# Args: mirror_url artifact_id sha256
+# Args: proxy_url artifact_id sha256
 set -euo pipefail
-mirror_url="${1:?mirror_url}"
+proxy_url="${1:?proxy_url}"
 artifact_id="${2:?artifact_id}"
 expected_sha="${3:?sha256}"
 deb="/tmp/gitlab-ce_19.2.5-ce.0_amd64.deb"
 
 curl -fsS --retry 3 --connect-timeout 15 --max-time 900 \
-  "$mirror_url/artifacts/$artifact_id" -o "$deb"
+  "$proxy_url/artifacts/$artifact_id" -o "$deb"
 echo "$expected_sha  $deb" | sha256sum -c -
 # The shared target image may have Apache enabled at boot; GitLab's bundled
 # Nginx needs port 80.

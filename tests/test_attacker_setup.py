@@ -159,7 +159,7 @@ def test_every_step_script_hash_in_the_manifest_is_current() -> None:
 
 
 def test_apt_waits_long_enough_for_a_cold_proxy_cache() -> None:
-    """60s was not enough for a first fetch through the mirror VM.
+    """60s was not enough for a first fetch through the proxy VM.
 
     A cold cache against a snapshot host is slow: the first fetch of a large
     index exceeded a minute, apt broke the pipe, and the mirror logged

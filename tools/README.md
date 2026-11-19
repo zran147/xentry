@@ -15,7 +15,7 @@ Each of these exists because something failed in a way that was hard to see.
 |---|---|
 | `watch-session.py` | Polls a job and prints each step as it changes, plus the harness session feed. Submitting a job and reading `journalctl` tells you less, later. |
 | `probe-guest-ssh.sh` | The guest has an address and the broker still cannot reach it. Walks lease, route, bridge port state, filter and handshake in that order, because the answer has been at a different layer each time. |
-| `vm-net-report.sh` | Why the mirror VM cannot reach the internet. Read-only and bounded. |
+| `vm-net-report.sh` | Why the proxy VM cannot reach the internet. Read-only and bounded. |
 | `vm-packet-report.sh` | Watches packets on the job bridges. Read-only. Useful when the firewall looks right and traffic still vanishes. |
 | `preflight.py` | Does the dated archive actually carry the package at an affected version? No model call, no VM. Answers in seconds the question that otherwise fails four steps into a job. |
 | `restart-and-verify.sh` | Restarts both services and proves the restart happened, by PID and by start time. An install script once placed its files and exited before its restart, and the running app was thirteen minutes old while every file on disk was correct. |

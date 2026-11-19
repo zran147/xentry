@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Give the mirror VM its two job-side addresses and serve those bridges.
+# Give the proxy VM its two job-side addresses and serve those bridges.
 # Runs inside the VM, at boot, from xentry-job-nics.service.
 #
 # ADR 0002 stage 2: the target and the attacker sit on bridges this host has

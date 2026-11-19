@@ -122,7 +122,7 @@ if [ -f "$ETC/app.env" ]; then
   # as a thing to copy sends you looking for a value that was never set. The
   # names are printed, never the values - the pattern requires at least one
   # character after the = and then prints only the part before it.
-  set_keys=$(grep -oE '^(DEEPSEEK_API_KEY|XENTRY_NVD_API_KEY|XENTRY_POC_API_KEY)=.+' \
+  set_keys=$(grep -oE '^(DEEPSEEK_API_KEY|XENTRY_NVD_API_KEY|XENTRY_GITHUB_TOKEN|XENTRY_POC_API_KEY)=.+' \
     "$ETC/app.env" 2>/dev/null | cut -d= -f1 || true)
   if [ -n "$set_keys" ]; then
     echo "    $ETC/app.env - these hold a value you cannot regenerate:"
@@ -211,7 +211,7 @@ for t in xentry xentry_mirror xentry_phase xentry_wan; do
   nft list table inet "$t" >/dev/null 2>&1 && { act "nft delete table inet $t"; echo "    inet $t"; }
 done
 
-# Routes the mirror VM's bring-up added to the host.
+# Routes the proxy VM's bring-up added to the host.
 for cidr in 10.43.1.0/24 10.43.2.0/24; do
   route=$(ip route show "$cidr" 2>/dev/null || true)
   [ -n "$route" ] && act "ip route del '$cidr' || true" || true

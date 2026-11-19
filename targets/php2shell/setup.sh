@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # PHP 8.4.26 + Apache mod_php target setup. Runs as root in the target VM.
-# Args: mirror_url php_artifact_id php_sha256
+# Args: proxy_url php_artifact_id php_sha256
 set -euo pipefail
 
-mirror_url="${1:?mirror_url}"
+proxy_url="${1:?proxy_url}"
 artifact_id="${2:?php_artifact_id}"
 expected_sha="${3:?php_sha256}"
 src_dir="/usr/local/src/php-8.4.26"
@@ -11,7 +11,7 @@ tarball="/tmp/php-8.4.26.tar.xz"
 
 mkdir -p /usr/local/src /etc/php/conf.d /var/lib/php/sessions /var/lib/xentry /var/www/html
 curl -fsS --retry 3 --connect-timeout 15 --max-time 300 \
-  "$mirror_url/artifacts/$artifact_id" -o "$tarball"
+  "$proxy_url/artifacts/$artifact_id" -o "$tarball"
 echo "$expected_sha  $tarball" | sha256sum -c -
 
 rm -rf "$src_dir"

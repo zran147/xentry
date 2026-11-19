@@ -29,8 +29,8 @@ from dataclasses import dataclass
 
 TABLE = "xentry"
 BRIDGE = "xentry0"
-MIRROR_IP = "10.42.0.1"
-MIRROR_PORT = 8081
+GATEWAY_IP = "10.42.0.1"
+PROXY_PORT = 8081
 APT_PORT = 8082
 TARGET_IP = "10.42.0.10"
 ATTACKER_IP = "10.42.0.20"
@@ -80,9 +80,9 @@ PRIVATE = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }"
 
 
 def _wan_chain(
-    wan_bridge: str, job_bridge: str, proxy_ip: str, mirror_ports: list[int]
+    wan_bridge: str, job_bridge: str, proxy_ip: str, proxy_ports: list[int]
 ) -> str:
-    """Forward rules for a mirror VM that lives on its own bridge.
+    """Forward rules for a proxy VM that lives on its own bridge.
 
     Order is the whole content of this function.
 
@@ -96,10 +96,10 @@ def _wan_chain(
     answers; it never calls.
     """
     rules = ""
-    if mirror_ports:
+    if proxy_ports:
         rules += (
             f'    iifname "{job_bridge}" oifname "{wan_bridge}" ip daddr {proxy_ip} '
-            f"tcp dport {_port_set(mirror_ports)} accept\n"
+            f"tcp dport {_port_set(proxy_ports)} accept\n"
         )
     return (
         rules
@@ -132,14 +132,14 @@ def _input_chain(bridge: str, host_services: str = "", wan_bridge: str = "") -> 
         # exception. ADR 0002 calls this the boundary: the in-VM egress filter
         # catches the accident, and root inside that VM can flush it, so this
         # is the rule that has to hold.
-        # DHCP, and nothing else. The mirror VM takes its pinned address
+        # DHCP, and nothing else. The proxy VM takes its pinned address
         # from this host's dnsmasq, because the static alternative required
         # renaming a NIC and the rename left the VM unreachable. One UDP port
         # is the cost; every TCP service on this host stays closed, which is
         # the property that matters - port 8000 above all, since the app has
         # no authentication. dhclient is told to ignore the resolver dnsmasq
         # offers, so there is no DNS path to the host either.
-        # The broker SSHES INTO the mirror VM to write job.json, and the VM's
+        # The broker SSHES INTO the proxy VM to write job.json, and the VM's
         # replies arrive here, on this bridge, as input. Without this rule
         # they are dropped and every configure_mirror_vm() hangs - the job
         # bridge has had the same rule since the beginning; this bridge was
@@ -154,8 +154,8 @@ def _input_chain(bridge: str, host_services: str = "", wan_bridge: str = "") -> 
 def provisioning_rules(
     *,
     bridge: str = BRIDGE,
-    mirror_ip: str = MIRROR_IP,
-    mirror_port: int = MIRROR_PORT,
+    gateway_ip: str = GATEWAY_IP,
+    proxy_port: int = PROXY_PORT,
     table: str = TABLE,
     apt_port: int | None = None,
     registry_port: int | None = None,
@@ -164,7 +164,7 @@ def provisioning_rules(
     wan_bridge: str = "",
     proxy_ip: str = "",
 ) -> str:
-    # Two shapes, chosen by whether a mirror VM exists.
+    # Two shapes, chosen by whether a proxy VM exists.
     #
     # With proxy_ip set (ADR 0002), the mirrors are in a VM on its own bridge:
     # guest traffic crosses bridges and is policed in forward, the host offers
@@ -182,9 +182,9 @@ def provisioning_rules(
     def service(port: int | None) -> str:
         if not port:
             return ""
-        return f'    iifname "{bridge}" ip daddr {mirror_ip} tcp dport {port} accept\n'
+        return f'    iifname "{bridge}" ip daddr {gateway_ip} tcp dport {port} accept\n'
 
-    ports = [p for p in (mirror_port, apt_port, registry_port,
+    ports = [p for p in (proxy_port, apt_port, registry_port,
                          attacker_apt_port, oci_port) if p]
     if proxy_ip and wan_bridge:
         services = _wan_chain(wan_bridge, bridge, proxy_ip, ports)
@@ -236,7 +236,7 @@ def locked_rules(
         ]
     )
     # No mirrors: unreachable from here on, which is the point of the phase.
-    # With a mirror VM that means NO job-to-wan rule at all - _wan_chain is
+    # With a proxy VM that means NO job-to-wan rule at all - _wan_chain is
     # asked for an empty port list, so it emits only the reply rule, the
     # private drop and the proxy VM's own internet. A guest that tries to
     # fetch during the locked phase is dropped at the bridge crossing, exactly

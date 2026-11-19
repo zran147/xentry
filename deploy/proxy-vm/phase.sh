@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Load this job's phase rules. Runs inside the mirror VM (ADR 0002 stage 2).
+# Load this job's phase rules. Runs inside the proxy VM (ADR 0002 stage 2).
 #
 # The host used to carry these: nothing between the guests during
 # provisioning, only the target's declared ports once locked. It could,
@@ -9,8 +9,7 @@
 # Read from /etc/xentry-mirror/phase.json, written by the broker over ssh:
 #
 #   {"phase": "provisioning" | "locked",
-#    "target_ip": "10.42.1.10", "attacker_ip": "10.42.2.20",
-#    "target_ports": [8080], "mirror_ports": [80, 8082, 8083, 8084, 8086]}
+#    "proxy_ports": [80, 8082, 8083, 8084, 8086]}
 #
 # SCOPED BY SUBNET, NOT BY INTERFACE NAME. Interface names depend on PCI slots
 # and have already cost two cycles in this VM's bring-up. Addresses are what
@@ -54,18 +53,20 @@ def ports(key):
     return "{ " + ", ".join(str(p) for p in sorted(set(got))) + " }"
 
 
-for value in (phase, c.get("target_ip") or "-", c.get("attacker_ip") or "-",
-              ports("target_ports"), ports("mirror_ports")):
+# Two fields, not five. target_ip, attacker_ip and target_ports were read to
+# build one narrow rule between the guests - attacker to target, tcp, on the
+# declared ports. That rule is gone: the guests reach each other without
+# restriction now, matched subnet to subnet, so none of the three is consulted.
+# They were still parsed and still sent, which reads as configuration and
+# changes nothing.
+for value in (phase, ports("proxy_ports")):
     print(value)
 PY
 )
-[ "${#FIELDS[@]}" -eq 5 ] || {
-  echo "refusing: $CONFIG did not yield five fields" >&2; exit 1; }
+[ "${#FIELDS[@]}" -eq 2 ] || {
+  echo "refusing: $CONFIG did not yield two fields" >&2; exit 1; }
 PHASE="${FIELDS[0]}"
-TARGET="${FIELDS[1]}"
-ATTACKER="${FIELDS[2]}"
-TPORTS="${FIELDS[3]}"
-MPORTS="${FIELDS[4]}"
+MPORTS="${FIELDS[1]}"
 
 rules=""
 if [ "$PHASE" = "provisioning" ] && [ "$MPORTS" != "-" ]; then
@@ -81,11 +82,27 @@ else
   rules="    ip saddr ${JOBS} meta l4proto tcp drop"
 fi
 
-cross=""
-if [ "$PHASE" = "locked" ] && [ "$TPORTS" != "-" ] \
-   && [ "$TARGET" != "-" ] && [ "$ATTACKER" != "-" ]; then
-  cross="    ip saddr ${ATTACKER} ip daddr ${TARGET} tcp dport ${TPORTS} accept"
-fi
+# BETWEEN THE TWO GUESTS: EVERYTHING, BOTH WAYS, IN EITHER PHASE.
+#
+# This used to be one rule - attacker to target, tcp, on the declared ports -
+# with every other packet between them caught by the drop below. That was a
+# firewall between two sacrificial machines, and it quietly decided which CVEs
+# could reproduce at all:
+#
+#   * a reverse shell is a NEW connection FROM the target, so it was dropped;
+#     ct state established,related only covers replies on the attacker's own
+#     connection.
+#   * so is every callback an exploit uses to prove itself - Log4Shell's JNDI
+#     fetch, an XXE or SSRF probe, any egress check.
+#
+# The PoC then failed and the report said the exploit did not reproduce, which
+# is a verdict about the CVE for a packet the firewall ate.
+#
+# Nothing is given away by this. The isolation that matters is the DROP below
+# and the input chain: neither guest can reach the internet, this VM's
+# services, or the host. They can only reach each other, which is the one
+# conversation the job exists to have.
+cross="    ip saddr ${JOBS} ip daddr ${JOBS} accept"
 
 tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
 cat > "$tmp" <<NFT

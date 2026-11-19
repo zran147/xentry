@@ -1,11 +1,11 @@
 #!/usr/sbin/nft -f
-# The HOST's permanent rules for the mirror VM's bridge (ADR 0002).
+# The HOST's permanent rules for the proxy VM's bridge (ADR 0002).
 #
 # WHY THIS FILE EXISTS, AND WHY IT IS NOT IN THE PER-JOB TABLE.
 #
 # The per-job `xentry` table is applied in create_network and cleared in
 # cleanup, so between jobs it does not exist - and the rule that stops the
-# mirror VM reaching this host was in it. The VM is PERSISTENT and has
+# proxy VM reaching this host was in it. The VM is PERSISTENT and has
 # internet access, so for most of its life nothing on this host stood between
 # it and port 8000, where the app answers without authentication.
 #

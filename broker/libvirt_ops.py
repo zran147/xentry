@@ -211,7 +211,7 @@ def network_xml(
     # gateway="" builds a network with NO <ip> element: a pure layer-2 island
     # with no address on this host and no dnsmasq. That is what stage 2 of
     # ADR 0002 needs - the guests must have no bridge to the host at all, so
-    # the mirror VM is their only neighbour, their router, and their DHCP.
+    # the proxy VM is their only neighbour, their router, and their DHCP.
     #
     # Nothing can be filtered by this host on such a bridge (br_netfilter is
     # not loaded, so two VMs on one bridge talk at layer 2 and never reach the
@@ -234,7 +234,7 @@ def network_xml(
         "<network>\n"
         f"  <name>{_esc(name)}</name>\n"
         # "none" for a job network: an island, which is what makes the guests
-        # unable to route anywhere. "nat" for the mirror VM's own network, the
+        # unable to route anywhere. "nat" for the proxy VM's own network, the
         # single place in this system that is allowed to reach the internet
         # (ADR 0002). Nothing else should ever pass anything but the default.
         f"  <forward mode='{_esc(forward)}'/>\n"
@@ -258,7 +258,7 @@ def domain_xml(
     seed_path: Path,
     network_name: str,
     mac: str,
-    # (network, mac) for every NIC after the first. The mirror VM needs one
+    # (network, mac) for every NIC after the first. The proxy VM needs one
     # per job bridge once it routes between the target and the attacker, and
     # a VM with one interface cannot be a router.
     extra_nics: tuple[tuple[str, str], ...] = (),

@@ -191,7 +191,7 @@ def test_it_serves_over_http_to_the_guest(tmp_path: Path, upstream: object) -> N
 
 def test_the_apt_path_is_open_for_provisioning_and_closed_after() -> None:
     opened = provisioning_rules(
-        bridge="xentry-1", mirror_ip="10.42.1.1", table="xentry_1", apt_port=8082
+        bridge="xentry-1", gateway_ip="10.42.1.1", table="xentry_1", apt_port=8082
     )
     assert "tcp dport 8082 accept" in opened
     # Same gateway as the artifact mirror: a host service, not a route out.
@@ -204,7 +204,7 @@ def test_the_apt_path_is_open_for_provisioning_and_closed_after() -> None:
 
 
 def test_without_the_proxy_the_rule_is_absent() -> None:
-    assert "8082" not in provisioning_rules(bridge="xentry-1", mirror_ip="10.42.1.1")
+    assert "8082" not in provisioning_rules(bridge="xentry-1", gateway_ip="10.42.1.1")
 
 
 def test_the_step_is_allowlisted_and_hashed() -> None:
@@ -336,30 +336,6 @@ def test_the_broker_refuses_a_serial_the_archive_cannot_have(tmp_path: Path) -> 
         with pytest.raises(AptProxyError):
             check_serial(bad)
     assert ARCHIVES["ubuntu"].floor < "20261029T000000Z"
-
-
-def test_a_job_serial_reaches_the_proxy_and_is_reported(tmp_path: Path) -> None:
-    from broker.errors import BrokerError
-    from tests.test_runtime import make_runtime
-
-    runtime, _virsh, _nft, _ = make_runtime(
-        tmp_path, start_apt_proxy=True, mirror_bind="127.0.0.1", apt_port=0
-    )
-    result = runtime.create_network("job-1", "isolated", "20261029T000000Z")
-    try:
-        assert result["apt_snapshot"] == "20261029T000000Z"
-        assert runtime.apt_proxies["job-1"].serial == "20261029T000000Z"
-        # The guest's paths carry no serial, so it still cannot choose one.
-        assert runtime.apt_proxies["job-1"].base.endswith("/ubuntu/20261029T000000Z")
-    finally:
-        runtime.destroy_network("xentry-job-1")
-    # A serial the archive cannot have is a refusal, not a failed network.
-    with pytest.raises(BrokerError) as excinfo:
-        runtime.create_network("job-2", "isolated", "19990101T000000Z")
-    assert excinfo.value.code == "broker_registry_rejected"
-
-
-# --- the second archive ----------------------------------------------------
 
 
 def test_each_archive_has_its_own_upstream_and_floor() -> None:

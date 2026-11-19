@@ -157,9 +157,9 @@ SCRIPT = """#!/usr/bin/env bash
 # a comment
 set -euo pipefail
 
-mirror_url="${1:?mirror_url}"
+proxy_url="${1:?proxy_url}"
 curl -fsS --retry 3 \\
-  "$mirror_url/artifacts/x" \\
+  "$proxy_url/artifacts/x" \\
   -o /tmp/x
 cat > /etc/conf <<'INI'
 display_errors = On
@@ -177,7 +177,7 @@ def _plan(tmp_path: Path, text: str = SCRIPT) -> list[str]:
 def test_plan_joins_continuations(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     joined = [c for c in plan if c.startswith("curl")]
-    assert joined == ['curl -fsS --retry 3 "$mirror_url/artifacts/x" -o /tmp/x']
+    assert joined == ['curl -fsS --retry 3 "$proxy_url/artifacts/x" -o /tmp/x']
 
 
 def test_plan_skips_comments_and_blanks(tmp_path: Path) -> None:

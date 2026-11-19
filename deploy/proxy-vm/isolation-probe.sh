@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run INSIDE the mirror VM. Proves the isolation that ADR 0002 claims.
+# Run INSIDE the proxy VM. Proves the isolation that ADR 0002 claims.
 #
 # This is the test the ADR says to write first, and the reason is asymmetry:
 # getting the mirror rules wrong breaks installs loudly, within one job.

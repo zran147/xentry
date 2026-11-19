@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The five mirrors, as one service inside the mirror VM (ADR 0002).
+"""The five mirrors, as one service inside the proxy VM (ADR 0002).
 
 This file lives under deploy/ because it is deployed INTO the VM: it is not
 part of the host application and it is not counted against the host's line

@@ -50,8 +50,8 @@ xentry-read <subcommand> [job_id]
   nft                  the host's full nftables ruleset
   virt                 libvirt domains, networks and their bridges
   net                  host bridges, their ports and the routes to the guests
-  vm                   the mirror VM: filter, phase, dnsmasq, leases, sockets
-  vm-journal           the mirror VM's unit logs
+  vm                   the proxy VM: filter, phase, dnsmasq, leases, sockets
+  vm-journal           the proxy VM's unit logs
   all                  journal, nft, virt, net, vm
 USAGE
 }

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -170,12 +171,22 @@ def wheel_commands(wheels: list[dict[str, Any]]) -> str:
     lines = "".join(
         f"{entry['url']} --hash=sha256:{entry['sha256']}\n" for entry in wheels
     )
+    # --ignore-installed, or the attacker image cannot be built at all:
+    #   ERROR: Cannot uninstall urllib3 2.0.7, RECORD file not found.
+    #   Hint: The package was installed by debian.
+    # The base image already carries python3-urllib3 from apt, and a
+    # dpkg-installed package has no RECORD, so pip refuses to replace it and
+    # the build dies at 108s with set -euo pipefail. --ignore-installed skips
+    # the uninstall and installs over it, which is what this list already
+    # means: pip's /usr/local/lib/python3/dist-packages precedes apt's
+    # /usr/lib/python3/dist-packages on sys.path, so the pinned wheel is the
+    # one a PoC imports. Digests are still enforced by --require-hashes.
     return (
         "cat > /tmp/xentry-wheels.txt <<'XENTRYWHEELS'\n"
         f"{lines}"
         "XENTRYWHEELS\n"
         "pip3 install --no-cache-dir --no-deps --require-hashes "
-        "--break-system-packages -r /tmp/xentry-wheels.txt; "
+        "--break-system-packages --ignore-installed -r /tmp/xentry-wheels.txt; "
         "rm -f /tmp/xentry-wheels.txt; "
     )
 
@@ -187,9 +198,25 @@ def cloud_init(
     tarballs: list[dict] | None = None,
     wheels: list[dict[str, Any]] | None = None,
 ) -> Path:
+    # Point the GUEST at a mirror when the archive is unreliable. Every image
+    # runs apt-get update inside itself against the base image's own sources;
+    # when archive.ubuntu.com answers one request in two, seven builds crawl
+    # for ten minutes each and the eighth dies when apt finally gives up. A
+    # mirror serves the same pockets and the same Canonical-signed packages, so
+    # the release-day pin and --no-upgrade below are unaffected.
+    # sed -E, not sed: `?` is literal in a basic regex, so `https?://` matched
+    # nothing and the rewrite silently did not happen. And @ as the delimiter,
+    # not |, because the | inside the alternation would close the s command.
+    mirror = os.environ.get("XENTRY_APT_MIRROR", "").rstrip("/")
+    pattern = r"https?://([a-z.]*archive|security)\.ubuntu\.com/ubuntu"
+    retarget = (
+        f"sed -Ei 's@{pattern}@{mirror}@g' /etc/apt/sources.list "
+        "/etc/apt/sources.list.d/* 2>/dev/null || true; " if mirror else ""
+    )
     command = (
         "set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; "
-        "apt-get update; "
+        + retarget
+        + "apt-get update; "
         # --no-upgrade, so a RELEASE-DAY base image stays on release-pocket
         # versions. This install runs against the image's OWN sources, which
         # are the live archive, so without it ca-certificates, curl and

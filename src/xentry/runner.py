@@ -1228,7 +1228,7 @@ class JobRunner:
                 {
                     "network_id": network.get("network_id", ""),
                     "subnet": network.get("subnet", ""),
-                    "mirror_url": network.get("mirror_url", ""),
+                    "proxy_url": network.get("proxy_url", ""),
                     "apt_proxy_url": network.get("apt_proxy_url", ""),
                     "apt_snapshot": network.get("apt_snapshot", ""),
                     "apt_archive": network.get("apt_archive", ""),
@@ -1409,7 +1409,7 @@ class JobRunner:
 
             def setup_params() -> dict[str, str]:
                 assert target is not None
-                mirror_url = str(network["mirror_url"])
+                proxy_url = str(network["proxy_url"])
                 if ecosystem_env is not None:
                     registry_url = str(network.get("registry_proxy_url") or "")
                     if not registry_url:
@@ -1525,18 +1525,18 @@ class JobRunner:
                     }
                 if target.target_id == "php2shell":
                     return {
-                        "mirror_url": mirror_url,
+                        "proxy_url": proxy_url,
                         "php_artifact_id": "php-8.4.26-src",
                         "php_sha256": _artifact_sha("php-8.4.26-src"),
                     }
                 if target.target_id == "gitlab":
                     return {
-                        "mirror_url": mirror_url,
+                        "proxy_url": proxy_url,
                         "gitlab_artifact_id": "gitlab-19.2.5-deb",
                         "gitlab_sha256": _artifact_sha("gitlab-19.2.5-deb"),
                     }
                 return {
-                    "mirror_url": mirror_url,
+                    "proxy_url": proxy_url,
                     "kernel_artifact_id": "kernel-6.17.0-23",
                     "kernel_sha256": _artifact_sha("kernel-6.17.0-23"),
                     "kernel_modules_artifact_id": "kernel-modules-6.17.0-23",

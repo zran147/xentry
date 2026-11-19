@@ -13,7 +13,7 @@
 # config, the NIC name and the firewall, which is what cost us the last cycle.
 set -uo pipefail
 
-RUN=/var/lib/xentry/proxy-vm
+RUN=/var/lib/xentry/mirror-vm
 KEY=/etc/xentry/proxy-vm.key
 NET=xentry-wan
 BRIDGE=xentrywan0
@@ -99,7 +99,7 @@ if nft list table inet xentry_wan >/dev/null 2>&1; then
   echo "    present:"
   nft list table inet xentry_wan | sed 's/^/      /'
 else
-  echo "    MISSING. Between jobs, nothing on this host stops the mirror VM"
+  echo "    MISSING. Between jobs, nothing on this host stops the proxy VM"
   echo "    reaching it - including port 8000, which has no authentication."
   echo "    Fix: sudo nft -f /etc/xentry/host-wan.nft"
   echo "         sudo systemctl enable --now xentry-wan-firewall"

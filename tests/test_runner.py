@@ -37,7 +37,7 @@ class FakeBroker:
             # host has provisioned.
             return {
                 "network_id": f"xentry-{params['job_id']}",
-                "mirror_url": "http://10.42.0.1:8081",
+                "proxy_url": "http://10.42.0.1:8081",
                 "apt_proxy_url": "http://10.42.0.1:8082",
                 "apt_snapshot": "20211004T000000Z",
                 "apt_archive": "debian",

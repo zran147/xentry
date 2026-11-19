@@ -42,7 +42,7 @@ import urllib.request
 from dataclasses import dataclass
 
 # timezone.utc, not datetime.UTC: UTC was added in Python 3.11 and this
-# module is copied into the mirror VM, which runs the base image's
+# module is copied into the proxy VM, which runs the base image's
 # python - 3.9 on Debian 11. The import failed there and took the whole
 # mirror service down:
 #   ImportError: cannot import name 'UTC' from 'datetime'
