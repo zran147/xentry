@@ -98,7 +98,13 @@ for d in "$APP" "$STATE" "$ETC" /run/xentry "$UVPY"; do
   [ -e "$d" ] || continue
   printf '    %-24s %s\n' "$d" "$(du -sh "$d" 2>/dev/null | cut -f1)"
 done
-ls -d /opt/xentry-broker.retired.* 2>/dev/null | while read -r d; do
+# A glob loop, not `ls ... | while`. With no match, ls exits 2, pipefail
+# propagates it, and set -e kills the script - which is exactly what happened:
+# the inventory stopped after this line and never printed the irreversible
+# section, the users, the packages, or the DRY RUN footer. An unexpanded glob
+# is handled by the -e test instead.
+for d in /opt/xentry-broker.retired.*; do
+  [ -e "$d" ] || continue
   printf '    %-24s %s\n' "$d" "$(du -sh "$d" 2>/dev/null | cut -f1)"
 done
 
@@ -112,10 +118,21 @@ done
 # Name the keys without reading the file: the variable names are public, the
 # values are not, and this script never prints them.
 if [ -f "$ETC/app.env" ]; then
-  echo "    $ETC/app.env holds, among others:"
-  grep -oE '^(DEEPSEEK_API_KEY|XENTRY_NVD_API_KEY|XENTRY_POC_API_KEY)=' \
-    "$ETC/app.env" 2>/dev/null | tr -d '=' | sed 's/^/      /' || true
-  echo "      (values not shown; copy them out before --really)"
+  # Only keys that actually HOLD something. Listing an empty XENTRY_POC_API_KEY
+  # as a thing to copy sends you looking for a value that was never set. The
+  # names are printed, never the values - the pattern requires at least one
+  # character after the = and then prints only the part before it.
+  set_keys=$(grep -oE '^(DEEPSEEK_API_KEY|XENTRY_NVD_API_KEY|XENTRY_POC_API_KEY)=.+' \
+    "$ETC/app.env" 2>/dev/null | cut -d= -f1 || true)
+  if [ -n "$set_keys" ]; then
+    echo "    $ETC/app.env - these hold a value you cannot regenerate:"
+    printf '%s\n' "$set_keys" | sed 's/^/      /'
+    echo "      (values not shown. Copy them out before --really:)"
+    echo "      sudo grep -E '^($(printf '%s' "$set_keys" | paste -sd'|' -))=' \\"
+    echo "        $ETC/app.env"
+  else
+    echo "    $ETC/app.env holds no API keys with values set"
+  fi
 fi
 
 echo "  users, groups, and sudoers"
