@@ -1863,3 +1863,86 @@ def test_the_state_directory_is_traversable_by_qemu() -> None:
     # The runtime's per-job version must stay too: it covers jobs/ and below.
     runtime = (root / "broker/runtime.py").read_text()
     assert "parent.chmod(parent.stat().st_mode | 0o001)" in runtime
+
+
+def test_dev_access_refuses_root_and_service_accounts() -> None:
+    """DEV=1 resolved the developer to root and reported success.
+
+    sudo sets SUDO_USER=root when ROOT runs sudo, so `sudo DEV=1 ./install.sh`
+    from a root shell names root as the developer. The step then did its work
+    faithfully: it created xentry-dev with root as its only member, regrouped
+    the code trees to it, wrote root two sudo rules it does not need, and told
+    root to start a new login shell for a group that grants it nothing.
+
+    The visible result was a tree owned by a group containing only root, so the
+    actual human still could not write to it - the one thing the step exists to
+    arrange.
+
+    Service accounts are refused for a different reason: xentry, xentry-vm and
+    xentry-guest each run one thing with one set of files, and handing one a
+    writable code tree plus a sudo rule widens whatever that daemon can be made
+    to do. Same for any uid below 1000, which is a system account by
+    convention on Debian and Ubuntu.
+    """
+    import pathlib
+
+    root_dir = pathlib.Path(__file__).resolve().parents[1]
+    install = (root_dir / "install.sh").read_text()
+    code = "\n".join(l for l in install.splitlines() if not l.strip().startswith("#"))
+
+    assert '[ "$(id -u "$DEV_USER")" -eq 0 ]' in code, "root is still accepted"
+    assert '"$DEV_USER" = xentry ' in code or '"$DEV_USER" = xentry]' in code or \
+        '[ "$DEV_USER" = xentry ]' in code, "the app service account is still accepted"
+    assert '"$DEV_USER" = xentry-vm' in code, "the QEMU account is still accepted"
+    assert '[ "$(id -u "$DEV_USER")" -lt 1000 ]' in code, "system accounts are accepted"
+
+    # The refusal has to say how to fix it, or the next person repeats it.
+    assert "DEV_USER=<your-login>" in code
+
+    # AND IT HAS TO RUN BEFORE STEP 1. Checking it where it is used meant
+    # eleven steps of work - packages, both virtualenvs, eight base images,
+    # the services - before being told the developer could not be named.
+    preflight = code.index('if [ "$DEV" = 1 ]; then')
+    first_step = code.index('step "host packages"')
+    assert preflight < first_step, "DEV=1 is validated after work has started"
+
+    # One place only: a second copy is a second thing to keep correct.
+    assert code.count('die "DEV=1 needs a human account, not root"') == 1
+
+
+def test_dev_access_does_not_strip_the_executable_bit() -> None:
+    """DEV=1 showed 23 files modified with zero content changed.
+
+    It ran `find "$tree" -type f -exec chmod 664 {} +` over src, tests, broker
+    and targets to make them group-writable. 664 is a mode, not a change: it
+    cleared the executable bit on every script git records as 100755 - all
+    eight run-poc-local-*, and each target's setup.sh, readiness.sh,
+    build-poc.sh, null.sh and run-poc.sh.
+
+    Nothing broke, because the broker chmods a step script to 0755 inside the
+    guest after copying it in. But `git status` then listed two dozen files as
+    modified for a mode the operator never asked to change, which buries any
+    real diff - and the next person has to work out whether it mattered.
+
+    g+w ADDS the permission that DEV=1 is for and leaves everything else as it
+    found it.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    code = "\n".join(
+        l for l in (root / "install.sh").read_text().splitlines()
+        if not l.strip().startswith("#")
+    )
+
+    assert "-type f -exec chmod g+w" in code, "a blanket file mode is back"
+    assert "-type d -exec chmod g+ws" in code, "a blanket directory mode is back"
+    for blanket in ("chmod 664", "chmod 2775", "chmod 775", "chmod 644"):
+        assert f"-exec {blanket}" not in code, f"{blanket} discards other bits"
+
+    # The scripts that must stay executable, as git has them.
+    executable = [
+        p for p in (root / "targets").rglob("*.sh")
+        if p.stat().st_mode & 0o111
+    ]
+    assert executable, "no target script is executable; the bit was stripped"

@@ -58,6 +58,47 @@ ADMIN_IPS="${XENTRY_ADMIN_IPS:-}"
 DEV="${DEV:-0}"
 DEV_USER="${DEV_USER:-${SUDO_USER:-}}"
 
+# DEV=1 IS VALIDATED HERE, NOT AT STEP 12.
+#
+# It used to be checked where it is used, which is eleven steps in - after host
+# packages, both virtualenvs, eight base images and the services. Being told
+# then that the developer could not be named wasted all of it.
+#
+# sudo sets SUDO_USER=root when ROOT runs sudo, so `sudo DEV=1 ./install.sh`
+# from a root shell resolves the developer to root. Step 12 then did its work
+# faithfully and uselessly: it created xentry-dev with root as its only member,
+# regrouped the code trees to it, granted root two sudo rules it has by
+# definition, and told root to open a new login shell for a group that gives it
+# nothing. The human still could not write to the tree, which is the one thing
+# the step exists to arrange.
+if [ "$DEV" = 1 ]; then
+	if [ -z "$DEV_USER" ]; then
+		die "DEV=1 needs a user: run under sudo, or pass DEV_USER=<name>."
+	elif ! id -u "$DEV_USER" >/dev/null 2>&1; then
+		die "DEV_USER=$DEV_USER is not a user on this host."
+	elif [ "$(id -u "$DEV_USER")" -eq 0 ]; then
+		echo
+		echo "  DEV=1 resolved the developer to root, which grants nothing."
+		echo "  SUDO_USER is root when root itself runs sudo, so a root shell"
+		echo "  cannot name the developer. Say who it is:"
+		echo
+		echo "    sudo DEV=1 DEV_USER=<your-login> $0"
+		echo
+		echo "  or run sudo as that user rather than from a root shell."
+		echo
+		die "DEV=1 needs a human account, not root"
+	elif [ "$DEV_USER" = xentry ] || [ "$DEV_USER" = xentry-vm ] \
+	     || [ "$DEV_USER" = xentry-guest ]; then
+		die "DEV_USER=$DEV_USER is a service account; use a human login"
+	elif [ "$(id -u "$DEV_USER")" -lt 1000 ]; then
+		# Below 1000 is a system account by convention on Debian and Ubuntu.
+		# Those run one daemon with one set of files; a writable code tree and
+		# a sudo rule widen whatever that daemon can be made to do.
+		die "DEV_USER=$DEV_USER is a system account (uid $(id -u "$DEV_USER")); use a human login"
+	fi
+	echo "DEV=1: the code trees will be writable by $DEV_USER (step 12)"
+fi
+
 # Set key=value in an environment file: rewrite the line if the key is there,
 # append it if it is not.
 env_set() {
@@ -538,21 +579,27 @@ step "optional: developer access"
 # stays 640 root:xentry and a developer cannot read it.
 if [ "$DEV" != 1 ]; then
 	note "not requested; the tree stays root-owned and unwritable."
-	note "To grant it: DEV=1 sudo $0   (or DEV=1 DEV_USER=someone)"
-elif [ -z "$DEV_USER" ]; then
-	die "DEV=1 needs a user: run under sudo, or pass DEV_USER=<name>."
-elif ! id -u "$DEV_USER" >/dev/null 2>&1; then
-	die "DEV_USER=$DEV_USER is not a user on this host."
+	note "To grant it: sudo DEV=1 DEV_USER=<your-login> $0"
 else
+	# DEV_USER was validated before step 1 ran: it exists, it is not root, not
+	# a service account and not a system uid. One place, checked early, so a
+	# bad value costs nothing instead of eleven steps.
 	groupadd -f xentry-dev
 	usermod -aG xentry-dev "$DEV_USER"
 	for tree in "$APP/src" "$APP/tests" "$APP/broker" "$APP/targets"; do
 		[ -d "$tree" ] || continue
 		chgrp -R xentry-dev "$tree"
+		# ADD group-write; do not SET a mode. `chmod 664` cleared the
+		# executable bit on all 23 scripts git records as 100755 - every
+		# run-poc-local-*, every target's setup.sh and readiness.sh - so
+		# `git status` showed two dozen files modified with zero content
+		# changed, and the only thing DEV=1 had done was make the tree
+		# writable. A blanket mode discards whatever else the file needed.
+		#
 		# setgid on directories, so a file created later inherits the group
 		# instead of silently reverting to root-only.
-		find "$tree" -type d -exec chmod 2775 {} +
-		find "$tree" -type f -exec chmod 664 {} +
+		find "$tree" -type d -exec chmod g+ws {} +
+		find "$tree" -type f -exec chmod g+w {} +
 		note "$tree -> xentry-dev, group-writable, setgid"
 	done
 	for keep in "$APP/.venv" "$APP/.venv-broker" "$ETC" "$STATE"; do
