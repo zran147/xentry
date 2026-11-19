@@ -1785,3 +1785,81 @@ def test_the_bring_up_does_not_need_an_index_to_exist() -> None:
     assert "need_db()" in read
     code = "\n".join(l for l in read.splitlines() if not l.strip().startswith("#"))
     assert code.count("need_db") >= 6, "not every index-reading subcommand guards"
+
+
+def test_the_base_image_the_bring_up_asks_for_is_one_that_gets_built() -> None:
+    """Step 11 asked for a file nothing produces.
+
+    build-images.py writes a base image under its ARTIFACT name -
+    f"{spec['base_artifact']}.img" - because three releases have three
+    different bases and one shared filename made each build overwrite the
+    last. install.sh still overrode BASE with ubuntu-24.04-base.img, a name
+    from before that change, so the bring-up stopped with
+
+        /var/lib/xentry/images/ubuntu-24.04-base.img is missing
+
+    on a host where every image was present and correct. The name has to be an
+    artifact in the catalog, or the file will never be there.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    catalog = (root / "config/artifacts.yaml").read_text()
+    artifacts = set(re.findall(r"^  ([a-z0-9][a-z0-9.-]*):$", catalog, re.MULTILINE))
+
+    wanted: set[str] = set()
+    for rel in ("install.sh", "scripts/proxy-vm-up.sh"):
+        text = (root / rel).read_text()
+        code = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+        wanted |= set(re.findall(r"BASE=\"\$\{BASE:-([A-Za-z0-9._-]+)\}\"", code))
+    assert wanted, "no BASE default found in either script"
+    for name in wanted:
+        assert name.endswith(".img"), name
+        assert name[: -len(".img")] in artifacts, (
+            f"{name} is not an artifact in config/artifacts.yaml, so "
+            "build-images.py never writes it"
+        )
+
+
+def test_the_state_directory_is_traversable_by_qemu() -> None:
+    """The proxy VM would not start on a host that had never run a job.
+
+    QEMU runs as xentry-vm. That user is not xentry and install.sh does not
+    put it in the xentry group - it only adds kvm - so to open a disk under
+    /var/lib/xentry it must be able to TRAVERSE that directory. At 0750 it
+    cannot, libvirt fails to open the overlay, and the domain stays "shut off"
+    with a zero-byte console log. The error names the disk, so it reads like a
+    missing or corrupt image.
+
+    runtime.py has always granted this per job -
+    `parent.chmod(parent.stat().st_mode | 0o001)` in create_vm - which made a
+    host that had run even one job silently correct, and hid the bug on every
+    host except a freshly installed one. Step 11 runs before the first job.
+
+    o+x is traversal, not listing: jobs/ stays 0750 xentry:xentry and
+    artifacts/ 0750 root:xentry, so this exposes nothing underneath.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    install = (root / "install.sh").read_text()
+    code = "\n".join(l for l in install.splitlines() if not l.strip().startswith("#"))
+
+    mode = re.search(r'install -d -m (\d+) -o xentry -g xentry "\$STATE"', code)
+    assert mode, "the state directory is not created where expected"
+    assert mode.group(1) == "0751", f"created {mode.group(1)}, qemu needs o+x"
+
+    # Still private underneath.
+    assert 'install -d -m 0750 -o xentry -g xentry "$STATE/jobs"' in code
+    assert 'install -d -m 0750 -o root -g xentry "$STATE/artifacts"' in code
+
+    # And the bring-up does not depend on install.sh having done it.
+    up = (root / "scripts/proxy-vm-up.sh").read_text()
+    upcode = "\n".join(l for l in up.splitlines() if not l.strip().startswith("#"))
+    assert "chmod o+x /var/lib/xentry" in upcode
+
+    # The runtime's per-job version must stay too: it covers jobs/ and below.
+    runtime = (root / "broker/runtime.py").read_text()
+    assert "parent.chmod(parent.stat().st_mode | 0o001)" in runtime

@@ -72,10 +72,12 @@ VCPU=2
 # are built artifacts that have already booted: cloud-init recorded an
 # instance-id and marked itself done, so a new seed can be ignored
 # entirely. This file is qcow2 despite the .img name - qemu-img says so.
-# Overridable: BASE=ubuntu-24.04-base.img retires both the end-of-life
-# bullseye pool (its packages are only on archive.debian.org now) and
-# Python 3.9, which is what broke the mirrors on import.
-BASE="${BASE:-debian-11-base-image.img}"
+# Ubuntu 24.04, which retires both the end-of-life bullseye pool (its packages
+# are only on archive.debian.org now) and Python 3.9, which is what broke the
+# mirrors on import. Named after the ARTIFACT, like every base image
+# build-images.py writes: ubuntu-base-image IS 24.04, and a name like
+# ubuntu-24.04-base.img is produced by nothing.
+BASE="${BASE:-ubuntu-base-image.img}"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 
@@ -117,6 +119,10 @@ echo "  no job in flight"
 echo "  base image $BASE"
 
 mkdir -p "$RUN" /etc/xentry
+# The same traversal runtime.py grants per job, done here because step 11 runs
+# before any job has. Without it qemu - running as another user - cannot reach
+# $RUN at all, however correct $RUN's own ownership is.
+chmod o+x /var/lib/xentry 2>/dev/null || true
 
 # WHO QEMU RUNS AS. This is why the first attempt never started: the
 # directory was 750 root:root, and a qemu process running as another user

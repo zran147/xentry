@@ -560,3 +560,93 @@ def test_ping_says_which_proxies_this_process_started(tmp_path: Path) -> None:
     }
     passed = set(re.findall(r"(start_\w+)=os\.environ\.get", main))
     assert accepted == passed, f"never passed: {sorted(accepted - passed)}"
+
+
+def test_a_vm_disk_is_not_world_readable() -> None:
+    """The ancestors are o+x so QEMU can reach its disk. The disk is not o+r.
+
+    create_vm walks data_dir, jobs_root, job_dir and vm_dir adding 0o001,
+    because QEMU runs as xentry-vm and must TRAVERSE broker-owned directories
+    to open its own overlay. That is execute-only: o+r is never added, so the
+    directories cannot be listed and a job id cannot be discovered from the
+    filesystem.
+
+    But qemu-img and genisoimage write their output at 0644 under root's
+    umask, and nothing set a mode on them. So anyone who learned a job id -
+    from the web app, which has no authentication - could traverse in and read
+    the target's disk image and its cloud-init seed. QEMU owns both, so 0640
+    costs it nothing.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    code = (root / "broker/runtime.py").read_text()
+
+    block = code[code.index("if self.qemu_user:"):][:1400]
+    assert "os.chmod(path, 0o640)" in block, "the overlay and seed are left at 0644"
+
+    # Execute-only on the ancestors, never read.
+    assert "parent.chmod(parent.stat().st_mode | 0o001)" in code
+    assert "| 0o004" not in code, "o+r on an ancestor would make jobs enumerable"
+    assert "| 0o007" not in code
+    # And nothing on the HOST is chmod'd world-writable. The bare constants
+    # 0o777 and 0o666 do appear, as the upper bound on the mode a caller may
+    # ask for when place_nonce writes a file INSIDE a guest - a validated
+    # range check, not a permission this process grants itself.
+    for bad in ("0o777", "0o666", "0o757", "0o707"):
+        assert f"chmod({bad}" not in code, f"host chmod to {bad}"
+        assert f", {bad})" not in code.replace(f'_integer(params, "mode", 0, {bad})', ""), (
+            f"host chmod to {bad}"
+        )
+
+    # The serial log was already explicit; keep it that way.
+    assert re.search(r"serial\.touch\(mode=0o640", code)
+
+
+def test_the_permission_document_still_describes_the_code() -> None:
+    """docs/security/permission_changes.md cites file:line, which rots.
+
+    Ten of its nineteen citations were already wrong within minutes of being
+    written, because edits above them shifted the line numbers. A security
+    document that points at the wrong line is worse than none: it is read as
+    authoritative.
+
+    Two things are checked. Every cited line still contains a permission
+    change, and every permission change in the code is cited somewhere. The
+    second half is what stops a new one being added unnoticed.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    doc_path = root / "docs/security/permission_changes.md"
+    assert doc_path.is_file(), "the permission document is missing"
+    doc = doc_path.read_text()
+
+    cited: set[tuple[str, int]] = set()
+    for rel, nums in re.findall(r"`((?:[a-z_]+/)+[a-z_]+\.py):(\d+(?:,\d+)*)`", doc):
+        for num in nums.split(","):
+            cited.add((rel, int(num)))
+
+    wrong = []
+    for rel, number in sorted(cited):
+        lines = (root / rel).read_text().splitlines()
+        text = lines[number - 1].strip() if number <= len(lines) else "(past end of file)"
+        if not re.search(r"chmod|chown|0o[0-7]{3}", text):
+            wrong.append(f"{rel}:{number} is {text[:50]!r}")
+    assert not wrong, "citations no longer point at a permission change: " + "; ".join(wrong)
+
+    # And nothing changes a mode or owner without being written down.
+    actual: set[tuple[str, int]] = set()
+    for rel in ("broker/runtime.py", "broker/main.py", "broker/aptproxy.py",
+                "broker/ociproxy.py", "broker/registryproxy.py",
+                "src/xentry/web/app.py", "src/xentry/artifact_tools.py"):
+        for number, line in enumerate((root / rel).read_text().splitlines(), 1):
+            if re.search(r"\.chmod\(|os\.chmod\(|os\.chown\(", line):
+                actual.add((rel, number))
+    undocumented = sorted(actual - cited)
+    assert not undocumented, (
+        "permission changes not in docs/security/permission_changes.md: "
+        + ", ".join(f"{rel}:{n}" for rel, n in undocumented)
+    )

@@ -358,7 +358,8 @@ claim.
   install.sh              the deployment, step by step
   uninstall.sh            its inverse, dry-run by default
 
-/etc/xentry/              755 root:xentry
+/etc/xentry/              750 root:xentry  - the xentry group traverses it;
+                                            nobody else reaches the keys
   app.env                 0640 root:xentry  - the app's settings and the key
   broker.env              0600 root:root    - the broker's settings
   proxy-vm.key            the proxy VM's ssh key

@@ -129,7 +129,19 @@ usermod -aG kvm xentry-vm
 # Broker-created subdirectories remain root-owned. No mirror directory: the
 # host-side artifact mirror was deleted with the non-proxy path, and the proxy
 # VM's own disk lives in $STATE/mirror-vm, made by scripts/proxy-vm-up.sh.
-install -d -m 0750 -o xentry -g xentry "$STATE"
+# 0751, NOT 0750. QEMU runs as xentry-vm, which is not xentry and is not in
+# that group, so it must be able to TRAVERSE this directory to reach a disk
+# underneath it. At 0750 libvirt cannot open the overlay and the domain stays
+# "shut off" with a zero-byte console log - which is how step 11 failed on a
+# host whose images were all present.
+#
+# runtime.py already does this per job (`parent.chmod(... | 0o001)` in
+# create_vm) so a host that had ever run a job was silently correct. A fresh
+# install has not, and step 11 comes before the first job.
+#
+# o+x grants traversal, not listing: jobs/ stays 0750 xentry:xentry and
+# artifacts/ stays 0750 root:xentry, so nothing under here becomes readable.
+install -d -m 0751 -o xentry -g xentry "$STATE"
 install -d -m 0750 -o xentry -g xentry "$STATE/jobs"
 # Read-only build inputs: images are read by QEMU; artifacts are read by the
 # root broker and the app preflight, so the app group gets read access.
@@ -499,7 +511,13 @@ else
 	# written against, and its pool is still served. REBUILD=1 discards the
 	# existing disk; STAGE2=0 does the mirrors without the job bridges. The
 	# run refuses to finish unless the isolation probe passes inside the VM.
-	env BASE="${BASE:-ubuntu-24.04-base.img}" "$APP/scripts/proxy-vm-up.sh"
+	# ubuntu-base-image.img, not ubuntu-24.04-base.img. build-images.py names a
+	# base file after its ARTIFACT - `f"{spec['base_artifact']}.img"` - because
+	# three releases have three different bases and one shared filename made
+	# each build overwrite the last. This override still used the old name, so
+	# step 11 stopped with "/var/lib/xentry/images/ubuntu-24.04-base.img is
+	# missing" on a host whose images were all present and correct.
+	env BASE="${BASE:-ubuntu-base-image.img}" "$APP/scripts/proxy-vm-up.sh"
 	# Step 7 already wrote both values into broker.env, and they are the
 	# broker's defaults besides - there is no longer a value that runs the
 	# mirrors on the host, so there is nothing left to "cut over".

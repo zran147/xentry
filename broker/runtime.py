@@ -671,6 +671,13 @@ class BrokerRuntime:
                 uid, gid = (int(part) for part in self.qemu_user.split(":", 1))
                 for path in (vm_dir, overlay, seed, serial):
                     os.chown(path, uid, gid)
+                # qemu-img and genisoimage leave their output at 0644 under
+                # root's umask, and the ancestors above are o+x so QEMU can
+                # reach it - so a local user who learns a job id could read a
+                # target's disk and its seed. QEMU owns both files, so 0640
+                # costs it nothing and closes that.
+                for path in (overlay, seed):
+                    os.chmod(path, 0o640)
             except (ValueError, OSError) as exc:
                 raise BrokerError(failure_code, f"cannot set QEMU ownership: {exc}") from exc
         domain_name = f"xentry-{job_id}-{role}"
