@@ -89,7 +89,12 @@ nets=$(virsh -q -c qemu:///system net-list --all 2>/dev/null | awk '{print $1}' 
 [ -n "$nets" ] && echo "$nets" | sed 's/^/    /' || echo "    none"
 
 echo "  nftables tables"
-for t in xentry xentry_mirror xentry_phase xentry_wan; do
+# xentry_wan is the host's permanent filter for the proxy VM's bridge;
+# xentry_admin is the webfilter for the app's port. The other two -
+# xentry_mirror and xentry_phase - are INSIDE the VM, and go when its disk
+# does. `xentry` was the per-job table the host installed, which it no longer
+# does: the runtime has no call to nft.apply left.
+for t in xentry_wan xentry_admin; do
   nft list table inet "$t" >/dev/null 2>&1 && echo "    inet $t"
 done
 
@@ -207,7 +212,7 @@ for net in $nets; do
   act "virsh -c qemu:///system net-undefine '$net' >/dev/null 2>&1 || true"
   echo "    $net"
 done
-for t in xentry xentry_mirror xentry_phase xentry_wan; do
+for t in xentry_wan xentry_admin; do
   nft list table inet "$t" >/dev/null 2>&1 && { act "nft delete table inet $t"; echo "    inet $t"; }
 done
 
@@ -238,7 +243,11 @@ fi
 ################################################################################
 say "UNITS, FILES, AND STATE"
 ################################################################################
-for f in /etc/systemd/system/xentry*.service; do
+# The glob catches xentry-wan-firewall.service and xentry-webfilter.service
+# as well as the two main units, plus any .bak left by a script that edited a
+# unit in place - systemd ignores those, a reader does not.
+for f in /etc/systemd/system/xentry*.service /etc/systemd/system/xentry*.service.bak.* \
+         /etc/systemd/system/xentry*.service.orig; do
   [ -e "$f" ] || continue
   act "rm -f '$f'"; echo "    $f"
 done

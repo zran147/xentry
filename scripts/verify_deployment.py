@@ -27,7 +27,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PATHS = (
     Path("/var/lib/xentry/jobs"),
-    Path("/var/lib/xentry/mirror"),
 )
 LIBVIRT_URI = "qemu:///system"
 LIBVIRT_SECMODEL = "apparmor"

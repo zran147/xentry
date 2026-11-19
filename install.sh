@@ -125,11 +125,12 @@ id -u xentry-vm >/dev/null 2>&1 || useradd --system \
 	--shell /usr/sbin/nologin xentry-vm
 usermod -aG kvm xentry-vm
 
-# App-owned state: SQLite index, app job attempts, broker job directories, and
-# the broker mirror. Broker-created subdirectories remain root-owned.
+# App-owned state: SQLite index, app job attempts and broker job directories.
+# Broker-created subdirectories remain root-owned. No mirror directory: the
+# host-side artifact mirror was deleted with the non-proxy path, and the proxy
+# VM's own disk lives in $STATE/mirror-vm, made by scripts/proxy-vm-up.sh.
 install -d -m 0750 -o xentry -g xentry "$STATE"
 install -d -m 0750 -o xentry -g xentry "$STATE/jobs"
-install -d -m 0750 -o xentry -g xentry "$STATE/mirror"
 # Read-only build inputs: images are read by QEMU; artifacts are read by the
 # root broker and the app preflight, so the app group gets read access.
 install -d -m 0755 -o root -g root "$STATE/images"
@@ -274,7 +275,18 @@ env_default "$ETC/app.env" XENTRY_ALLOWED_HOSTS localhost,127.0.0.1
 
 if [ -e "$ETC/broker.env" ]; then
 	note "$ETC/broker.env exists; left as it is"
-	grep -nE '^XENTRY_(WAN_BRIDGE|PROXY_IP)=' "$ETC/broker.env" || true
+	grep -nE '^XENTRY_PROXY_IP=' "$ETC/broker.env" || true
+	# An existing file is never rewritten, so one written before today still
+	# carries variables nothing reads. They are harmless but they describe a
+	# configuration that no longer exists, which is how an operator ends up
+	# changing a value and wondering why nothing happened.
+	dead=$(grep -oE '^XENTRY_(WAN_BRIDGE|START_MIRROR)' "$ETC/broker.env" || true)
+	if [ -n "$dead" ]; then
+		note "these are in it and are read by NOTHING since ADR 0002:"
+		printf '%s\n' "$dead" | sed 's/^/        /'
+		note "delete those lines, or delete $ETC/broker.env and re-run to"
+		note "have it written fresh - it holds no secrets."
+	fi
 else
 	cat >"$ETC/broker.env" <<'EOF'
 XENTRY_BROKER_SOCKET=/run/xentry/broker.sock
