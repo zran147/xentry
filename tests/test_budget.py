@@ -95,3 +95,35 @@ def test_no_container_runtime_dependency() -> None:
     deps = " ".join(data["project"].get("dependencies", [])).lower()
     assert "docker" not in deps
     assert "podman" not in deps
+
+
+def test_no_env_default_is_a_relative_path() -> None:
+    """A relative default resolves against the working directory, not the tree.
+
+    .env.example shipped ./var/artifacts, ./var/images, ./targets and
+    ./config/*.yaml. install.sh normalised some keys and missed three, so a
+    deployed host read artifacts from /opt/xentry/var/artifacts while its
+    manifest said /var/lib/xentry/artifacts/manifest.json - two directories,
+    1.1G in the one nothing consulted, and a backup that could easily have been
+    taken of the wrong one.
+
+    The app and the broker run with different working directories, so the same
+    relative value means different things to each. Absolute only.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    for name in (".env.example",):
+        path = root / name
+        if not path.is_file():
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#") or "=" not in stripped:
+                continue
+            value = stripped.split("=", 1)[1].strip()
+            if re.match(r"^\.{1,2}/", value):
+                offenders.append(f"{name}:{number}: {stripped}")
+    assert not offenders, "relative path defaults: " + ", ".join(offenders)

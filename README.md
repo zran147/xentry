@@ -1,18 +1,34 @@
-# xentry V1
+# xentry
 
 Local CVE reproduction with a target VM and, for remote PoCs, a lightweight attacker VM.
 
 **Design:** [docs/designs/xentry-v1.md](docs/designs/xentry-v1.md)
 **Normative contracts:** [docs/designs/xentry-v1-contracts.md](docs/designs/xentry-v1-contracts.md)
-**Phase 0 plan:** [phase0_plan.md](phase0_plan.md)
-**Host preflight:** [phase0_host_preflight.md](phase0_host_preflight.md)
+**Decisions:** [docs/adr/](docs/adr/)
+**What is derived from facts, and how:** [docs/designs/derived-from-facts.md](docs/designs/derived-from-facts.md)
 **Operator notes:** [docs/operations.md](docs/operations.md)
 
 ## Status
 
-Revision 5 is frozen. Phase 0 gates B/E/F/G have passing evidence on the WSL2 development host, with the deployment-only Gate B items listed in [phase0_status.md](phase0_status.md). The broker, two-VM lifecycle, artifact mirror, nonce placement, ADK extractor, validator, SQLite index, job runner, and web API/UI are implemented. PHP2Shell, Dirty Frag, and GitLab all completed end-to-end with reproduced verdicts on the development host; deployment-host checks remain. The web app now enforces Host/Origin/CSRF/JSON request integrity, verifies evidence hashes before serving, provides a deterministic audit bundle, and marks/cleans unfinished jobs on restart. Each attempt also keeps a hash-chained `events.jsonl` journal. `scripts/verify_deployment.py` reports the remaining deployment-host gaps.
+Local CVE reproduction: a CVE link and a PoC link go in, two VMs come up, the
+exploit runs against a real vulnerable build, and the verdict is a nonce the
+PoC had to plant plus evidence hashes that match.
 
-The LLM verdict is an assessment, not a deterministic proof and not a production risk assessment.
+Four jobs have reproduced end to end on this deployment — CVE-2021-41773
+(Apache path traversal) and three runs of CVE-2025-32463 (sudo chroot local
+privilege escalation) — each with `nonce_observed` and matching evidence
+hashes. 893 tests pass.
+
+Two things are in flight. The package mirrors have moved out of the broker
+process into a VM of their own ([ADR 0002](docs/adr/0002-mirrors-in-their-own-vm.md)),
+which is the path those four jobs ran through. Harness mode, where a model
+provisions the target itself and produces a reusable provisioning script
+([ADR 0003](docs/adr/0003-the-model-provisions-the-target.md),
+[ADR 0004](docs/adr/0004-free-exec-and-the-tool-surface.md)), is implemented
+and wired in but has not yet completed a job.
+
+The LLM verdict is an assessment, not a deterministic proof and not a
+production risk assessment.
 
 ## Requirements
 
@@ -49,7 +65,7 @@ how a CVE becomes a plan. Step 7 writes `/etc/xentry/app.env` from
 only line you must edit by hand. Everything else in the next section is worth
 reading but optional.
 
-| | |
+| # | step |
 |---|---|
 | 1 | host packages |
 | 2 | users, groups, and directories |
@@ -109,32 +125,30 @@ no libvirt or KVM group and never receives guest SSH keys.
 
 ## Environment variables
 
-The app service reads `/etc/xentry/app.env`; it does not use a development
-`.env`. Step 7 of `install.sh` creates it from
-[`.env.example`](.env.example), owned `root:xentry` mode `0640`, and sets the
-production paths. Edit it with `sudoedit /etc/xentry/app.env`.
+The app service reads `/etc/xentry/app.env`, owned `root:xentry` mode `0640`.
+Step 7 of `install.sh` creates it from [`.env.example`](.env.example) with
+every path already set; edit it with `sudoedit /etc/xentry/app.env`.
 
-Set at least:
+Two settings are yours to make:
 
 ```text
 DEEPSEEK_API_KEY=<your-key>
-XENTRY_DATA_DIR=/var/lib/xentry
-XENTRY_DB_PATH=/var/lib/xentry/xentry.db
-XENTRY_BROKER_SOCKET=/run/xentry/broker.sock
 XENTRY_ALLOWED_HOSTS=localhost,127.0.0.1
-XENTRY_IMAGES_MANIFEST=/var/lib/xentry/images/build-results.json
-XENTRY_ARTIFACT_MANIFEST=/var/lib/xentry/artifacts/manifest.json
-XENTRY_ARTIFACT_CATALOG=/opt/xentry/config/artifacts.yaml
-XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
-XENTRY_TARGETS_DIR=/opt/xentry/targets
 ```
 
-Everything but the key is already set by `install.sh`; the key is the one
-thing it will not write for you.
+`DEEPSEEK_API_KEY` is the only one with no usable default — `extract.py` and
+`validator.py` refuse with `provider_unavailable` without it, and those two
+steps are how a CVE becomes a plan.
 
-For the experimental tab, which asks a model to write the PoC instead of
-taking a PoC link, add a model as well. Any provider litellm speaks works; for
-a local `llama.cpp` server use the `openai/` prefix and point the base at its
+`XENTRY_ALLOWED_HOSTS` is the Host-header allowlist: add every hostname or
+address you use to reach the app, without a port. `localhost`, `127.0.0.1` and
+`::1` are always allowed. A missing entry is not a startup error — the app
+serves pages and then rejects every POST with `403 host_invalid`, which is a
+confusing way to find out.
+
+For the experimental tab, which asks a model to write the PoC instead of taking
+a PoC link, add a model. Any provider litellm speaks works; for a local
+`llama.cpp` server use the `openai/` prefix and point the base at its
 OpenAI-compatible endpoint:
 
 ```text
@@ -144,31 +158,16 @@ XENTRY_POC_API_KEY=sk-local
 XENTRY_POC_ATTEMPTS=3
 ```
 
-`llama.cpp` ignores the key, but litellm requires one to be present. With
-`XENTRY_POC_MODEL` empty the tab explains what to set and submits nothing,
-which is why `install.sh` only mentions it and moves on.
+`llama.cpp` ignores the key but litellm requires one to be present. Leaving
+`XENTRY_POC_MODEL` empty disables the tab, which is a valid state.
 
-Keep the rest of `.env.example` values unless you change a budget or model.
-An `nvd.nist.gov/vuln/detail/<CVE-ID>` link is resolved to the matching record
-on NVD's REST API before it is fetched, because the detail page is rendered in
-the browser: a plain GET of it returns the single-page-app shell for every
-path, with no CVE data in it. The API needs no browser and yields the
-description, CVSS metrics and affected-version configurations as fields.
 `XENTRY_NVD_API_KEY` is optional and raises NVD's rate limit from 5 requests
-per 30 seconds to 50; it is sent only to `services.nvd.nist.gov`, checked at
-every redirect hop. Any other CVE link is fetched exactly as given.
+per 30 seconds to 50. It is sent only to `services.nvd.nist.gov`, checked at
+every redirect hop.
 
-There is no environment variable for the app's listen address: the bind lives
-in the unit, and a non-loopback bind is the drop-in below. `XENTRY_APP_PORT`
-and `XENTRY_APP_HOST` are read by nothing — `XENTRY_APP_HOST` is still in
-`.env.example`, but the bind address is in the unit's `ExecStart`, which
-defaults to `127.0.0.1`.
-
-`XENTRY_ALLOWED_HOSTS` is the Host-header allowlist; add every hostname or
-address you use to reach the app, without a port (the check compares the
-hostname only). `localhost`, `127.0.0.1`, and `::1` are always allowed. A
-missing entry is not a startup error: the app serves pages and then rejects
-every POST with `403 host_invalid`.
+The broker has its own file, `/etc/xentry/broker.env`, mode `0600` and
+`root:root`. `install.sh` writes it and there is nothing in it you need to
+change. The DeepSeek key does not belong in it.
 
 ### Serving on a routable address
 
@@ -191,87 +190,47 @@ rather than editing the shipped unit, puts the address in
 `XENTRY_ALLOWED_HOSTS`, and runs `scripts/install-webfilter.sh` with the
 addresses you listed.
 
-`scripts/install-webfilter.sh` builds `table inet xentry_admin`, which accepts
-the app's port only from those addresses, accepts it on loopback, and drops it
-from everywhere else. The chain policy is `accept` and only that one port is
-filtered, so no other service can be locked out by it. The table is separate
-from the broker's `inet xentry`: that one hooks `forward` and is deleted and
-re-added on every job phase, while this one hooks `input` and the broker never
-touches it. The script also installs `xentry-webfilter.service` so the rules
-are re-applied on boot.
+The filter it installs is a separate nftables table from the broker's, which
+the broker deletes and re-adds on every job phase; this one it never touches.
+Only the app's port is filtered and the chain policy is `accept`, so no other
+service can be locked out by it, and a unit re-applies it on boot.
 
 Binding to the routable address alone means `127.0.0.1:8000` is no longer
 listening; reach the app at the address in the drop-in. Deleting the drop-in
 and running `daemon-reload` plus `restart xentry` returns the app to loopback.
 
-### /etc/xentry/broker.env
+### The mirror VM
 
-Step 7 writes the broker's own environment file, mode `0600` and `root:root`,
-and leaves it alone if it already exists:
+The five package mirrors — apt snapshot, registry, OCI — used to run inside the
+broker process, as root on the host, bound to each job network's gateway.
+[ADR 0002](docs/adr/0002-mirrors-in-their-own-vm.md) moved them into a VM of
+their own, so a guest fetching a package is no longer a guest opening a
+connection to a root process on this host. Step 11 of `install.sh` builds it;
+[`deploy/proxy-vm/README.md`](deploy/proxy-vm/README.md) is what each piece
+refuses to do and the failures that shaped it.
 
-```text
-XENTRY_BROKER_SOCKET=/run/xentry/broker.sock
-XENTRY_DATA_DIR=/var/lib/xentry
-XENTRY_IMAGE_DIR=/var/lib/xentry/images
-XENTRY_ARTIFACT_MANIFEST=/var/lib/xentry/artifacts/manifest.json
-XENTRY_ARTIFACT_CATALOG=/opt/xentry/config/artifacts.yaml
-XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
-XENTRY_TARGETS_DIR=/opt/xentry/targets
-XENTRY_APPLY_NFT=1
-XENTRY_START_MIRROR=1
-XENTRY_QEMU_USER=xentry-vm
-XENTRY_START_APT_PROXY=1
-XENTRY_START_REGISTRY_PROXY=1
-```
-
-The last two are both provisioning channels. Each is reachable from a guest
-while it provisions and is closed by `lock_network` before any PoC runs, so
-each is opted into here rather than assumed. Without the first, every derived
-apt target fails at provision; without the second, every ecosystem target
-does.
-
-Do not put the DeepSeek key in `broker.env`.
-
-### The mirror VM cut-over
-
-The five package mirrors — apt snapshot, registry, OCI — have historically run
-inside the broker process, as root on the host, bound to each job network's
-gateway. [ADR 0002](docs/adr/0002-mirrors-in-their-own-vm.md) moves them into
-a VM of their own, so a guest fetching a package is no longer a guest opening
-a connection to a root process on this host. Step 11 of `install.sh` builds
-it; [`deploy/proxy-vm/README.md`](deploy/proxy-vm/README.md) is what each
-piece refuses to do and the failures that shaped it.
-
-**Nothing is cut over until two variables are set** in `broker.env`, followed
-by a restart of `xentry-broker`:
+Two values address it, and `install.sh` writes both into `broker.env`:
 
 ```text
 XENTRY_WAN_BRIDGE=xentrywan0
 XENTRY_PROXY_IP=10.44.0.2
 ```
 
-With them unset, every nftables rule is byte-identical to the behaviour
-without the VM, and the mirrors stay in the broker process — a test asserts
-both shapes.
+These are not a switch. They are defaults in the broker as well, and an empty
+value does not fall back to running the mirrors on the host — that path no
+longer exists. With them in effect the guests sit on `xentry-target` and
+`xentry-attacker` with one bridge each and no host address, their mirrors are
+reached by routing through the VM, both firewall phases are pushed to the VM
+rather than applied here, and the persistent bridges outlive a job.
 
-With them set, five things change together, and a test asserts that too: the
-guests go on `xentry-target` and `xentry-attacker` (one bridge each, no host
-address), their mirrors are addressed at `10.44.0.2` and reached by routing
-through the VM, both phases are pushed to the VM instead of applied here, and
-the persistent bridges are never destroyed with a job.
-
-**No job has yet run through that path.** The first one is the test: watch its
-provision step, and if it cannot fetch, the phase and the lease are the two
-things to look at —
+When a provision step cannot fetch, the phase and the lease are the two things
+to look at:
 
 ```bash
 sudo /opt/xentry/scripts/proxy-vm-doctor.sh
 sudo ssh -i /etc/xentry/proxy-vm.key root@10.44.0.2 \
   'nft list table inet xentry_phase; journalctl -u dnsmasq -n 30 --no-pager'
 ```
-
-`/etc/xentry/proxy-vm.key` is generated on the VM's first run and is how the
-broker configures it per job. Keep it; `REBUILD=1` reuses it.
 
 ## VM confinement
 
@@ -315,38 +274,55 @@ Until those checks pass and a job has been observed with its QEMU enforcing
 under a `libvirt-<uuid>` profile, the VM boundary is not a completed Gate B
 claim.
 
-## Phase 0 checks
-
-```bash
-scripts/fetch-artifacts.sh --dry-run       # Gate G catalog
-scripts/fetch-artifacts.sh --download      # runtime artifact files + manifest
-scripts/build-images.sh --dry-run          # image manifests and tools
-scripts/build-images.sh --execute          # build and hash the three images
-pytest -q                                  # unit and contract tests
-scripts/run_extractor_gate.py --runtime adk # Gate F (needs DEEPSEEK_API_KEY)
-scripts/smoke_broker.py --start-mirror     # two-VM broker smoke
-scripts/run_target_php.py                  # PHP setup + readiness
-scripts/run_job_php.py                     # full PHP job through the runner
-```
-
-The smoke scripts expect `sg libvirt -c '...'` on the WSL2 development host. `scripts/run_job_php.py` starts its own broker server and uses the real extractor and validator.
-
 ## Layout
 
-`deploy/proxy-vm/` holds everything that is deployed **into** the mirror VM or
-onto the host's permanent firewall — `serve.py`, its nftables rulesets, its
-units, the phase renderer and the isolation probe. It sits outside `src/`,
-`broker/` and `scripts/` so the VM's own code does not compete for the line
-budget with the application that commands it.
-
 ```text
-docs/designs/     design and normative contracts
-config/           artifact and image manifests
-broker/           root-owned broker (registry skeleton)
-src/xentry/       app package (skeleton)
-targets/          checked-in setup scripts
-deploy/           systemd units and AppArmor profile
-install.sh        the deployment, step by step
-tests/            test suite
-var/              runtime state, gitignored
+/opt/xentry/              the one code tree; root-owned, 755
+  .venv/                  app virtualenv (app + dev groups)
+  .venv-broker/           broker virtualenv (asyncssh, pyyaml)
+  src/xentry/             the app package: runner, extractor, validator, web
+  broker/                 the root broker; imports nothing from src/
+  targets/                checked-in step scripts, digests in steps.yaml
+  config/                 artifact and image catalogues
+  deploy/                 systemd units, AppArmor profile
+  deploy/proxy-vm/        what is deployed INTO the mirror VM, and the host
+                          firewall: serve.py, rulesets, units, phase renderer,
+                          isolation probe. Outside src/ and broker/ so the VM's
+                          code does not compete for the line budget with the
+                          application that commands it.
+  docs/adr/               decisions, numbered
+  docs/designs/           designs and normative contracts
+  migrations/             schema, applied in order at startup
+  scripts/                operator tools
+  tests/                  the suite
+  tools/                  developer diagnostics, outside the line budget
+  install.sh              the deployment, step by step
+  uninstall.sh            its inverse, dry-run by default
+
+/etc/xentry/              755 root:xentry
+  app.env                 0640 root:xentry  - the app's settings and the key
+  broker.env              0600 root:root    - the broker's settings
+  proxy-vm.key            the mirror VM's ssh key
+
+/var/lib/xentry/          751 xentry:xentry - production state
+  xentry.db               the SQLite index
+  jobs/<job_id>/          per-job attempts, evidence, hash-chained events.jsonl
+  artifacts/              pinned PoCs and packages, with manifest.json
+  images/                 base images, with build-results.json
+  mirror/                 the broker's artifact mirror
+
+/run/xentry/              0750 root:xentry, tmpfs, created by the broker unit
+  broker.sock             0660 root:xentry; SO_PEERCRED decides who may call
 ```
+
+**Every path in `app.env` and `broker.env` is absolute.** They used to be
+relative — `./var/artifacts`, `./targets` — resolved against whatever working
+directory the process had, and the app and the broker do not share one. A
+deployed host ended up reading artifacts from `/opt/xentry/var/artifacts` while
+its manifest named `/var/lib/xentry/artifacts/manifest.json`: two directories,
+over a gigabyte in the one nothing consulted, and a backup that could easily be
+taken of the wrong one. `.env.example` ships absolute paths and a test refuses
+a relative default.
+
+The 22 `*_report.md` and `phase*.md` files at the top level are notes from the
+original generation of this project. They are history, not documentation.

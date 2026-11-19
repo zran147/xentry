@@ -261,6 +261,14 @@ env_set "$ETC/app.env" XENTRY_DB_PATH "$STATE/xentry.db"
 env_set "$ETC/app.env" XENTRY_BROKER_SOCKET /run/xentry/broker.sock
 env_set "$ETC/app.env" XENTRY_IMAGES_MANIFEST "$STATE/images/build-results.json"
 env_set "$ETC/app.env" XENTRY_ARTIFACT_MANIFEST "$STATE/artifacts/manifest.json"
+# These three were missed, and the result is a host where the app reads
+# artifacts from ./var/artifacts - relative, so /opt/xentry/var - while its
+# manifest says /var/lib/xentry/artifacts/manifest.json. Two directories, one
+# of them 1.1G of files the broker never looks at, and a manifest describing
+# the other. Every path in app.env is absolute now.
+env_set "$ETC/app.env" XENTRY_ARTIFACT_DIR "$STATE/artifacts"
+env_set "$ETC/app.env" XENTRY_IMAGE_DIR "$STATE/images"
+env_set "$ETC/app.env" XENTRY_IMAGE_MANIFESTS "$APP/config/image-manifests.yaml"
 env_set "$ETC/app.env" XENTRY_ARTIFACT_CATALOG "$APP/config/artifacts.yaml"
 env_set "$ETC/app.env" XENTRY_STEPS_MANIFEST "$APP/targets/steps.yaml"
 env_set "$ETC/app.env" XENTRY_TARGETS_DIR "$APP/targets"
@@ -280,6 +288,12 @@ XENTRY_STEPS_MANIFEST=/opt/xentry/targets/steps.yaml
 XENTRY_TARGETS_DIR=/opt/xentry/targets
 XENTRY_APPLY_NFT=1
 XENTRY_START_MIRROR=1
+# The mirror VM's address. Not a switch: these are the broker's own defaults
+# too, and an empty value does not fall back to running the mirrors on the host
+# - ADR 0002 removed that path. Written explicitly so the deployment states
+# where the mirrors are rather than relying on a constant in the code.
+XENTRY_WAN_BRIDGE=xentrywan0
+XENTRY_PROXY_IP=10.44.0.2
 XENTRY_QEMU_USER=xentry-vm
 # Both provisioning channels. Each is reachable from a guest while it
 # provisions and is closed by lock_network before any PoC runs, so each is
@@ -417,9 +431,13 @@ else
 	# existing disk; STAGE2=0 does the mirrors without the job bridges. The
 	# run refuses to finish unless the isolation probe passes inside the VM.
 	env BASE="${BASE:-ubuntu-24.04-base.img}" "$APP/scripts/proxy-vm-up.sh"
-	note "Nothing is cut over until XENTRY_WAN_BRIDGE=xentrywan0 and"
-	note "XENTRY_PROXY_IP=10.44.0.2 are in $ETC/broker.env and the broker"
-	note "is restarted. See README.md and deploy/proxy-vm/README.md."
+	# Step 7 already wrote both values into broker.env, and they are the
+	# broker's defaults besides - there is no longer a value that runs the
+	# mirrors on the host, so there is nothing left to "cut over".
+	note "The broker already addresses the VM at 10.44.0.2 over xentrywan0."
+	note "Restart it to pick up a VM built after it started:"
+	note "  sudo systemctl restart xentry-broker"
+	note "See deploy/proxy-vm/README.md for what each piece refuses to do."
 fi
 
 ################################################################################
