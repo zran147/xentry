@@ -29,6 +29,18 @@
 set -euo pipefail
 
 DB=/var/lib/xentry/xentry.db
+
+# Say so once, here, rather than let three inlined sqlite3 connects traceback.
+# This tool is what you reach for on a host that is half-installed or has just
+# been reset, which is exactly when the index does not exist: the app creates
+# it and applies its migrations on first start.
+need_db() {
+  [ -f "$DB" ] || {
+    echo "no index at $DB yet." >&2
+    echo "The app creates it on first start; nothing has run on this host." >&2
+    exit 1
+  }
+}
 JOBS=/var/lib/xentry/jobs
 KEY=/etc/xentry/proxy-vm.key
 PROXY=10.44.0.2
@@ -77,6 +89,7 @@ SQL
 
 case "${1:-}" in
   jobs)
+    need_db
     "$PY" - <<'SQL'
 import sqlite3
 db = sqlite3.connect("file:/var/lib/xentry/xentry.db?mode=ro", uri=True)
@@ -88,6 +101,7 @@ for row in db.execute(
 SQL
     ;;
   job)
+    need_db
     id=$(job_id "${2:-}")
     "$PY" - "$id" <<'SQL'
 import sqlite3, sys
@@ -121,13 +135,13 @@ for seq, verb, status in db.execute(
     print(f"  broker {seq:<3} {verb:20} {status}")
 SQL
     ;;
-  files)   id=$(job_id "${2:-}"); find "$JOBS/$id" -type f -printf '  %10s  %p\n' | sort -k2 ;;
-  serial)  id=$(job_id "${2:-}")
+  files)   need_db; id=$(job_id "${2:-}"); find "$JOBS/$id" -type f -printf '  %10s  %p\n' | sort -k2 ;;
+  serial)  need_db; id=$(job_id "${2:-}")
            for f in "$JOBS/$id"/*/*serial*.log; do
              [ -s "$f" ] || continue
              echo "  == $f"; tail -80 "$f" | sed 's/^/    /'
            done ;;
-  transcript) id=$(job_id "${2:-}")
+  transcript) need_db; id=$(job_id "${2:-}")
            for f in "$JOBS/$id"/*/*commands.txt "$JOBS/$id"/*/*.response.txt; do
              [ -s "$f" ] || continue
              echo "  == $f ($(wc -c <"$f") bytes)"; tail -60 "$f" | sed 's/^/    /'

@@ -90,8 +90,24 @@ echo "  tools present"
 
 inflight=$("$APP/.venv/bin/python" - <<'DB'
 import sqlite3
-db = sqlite3.connect("file:/var/lib/xentry/xentry.db?mode=ro", uri=True)
-print(db.execute("SELECT COUNT(*) FROM jobs WHERE outcome IS NULL").fetchone()[0])
+
+# A MISSING DATABASE IS NOT AN ERROR HERE.
+#
+# This opens the index read-only to refuse while a job is running. On a fresh
+# install - or after a reset that cleared the state - the file does not exist
+# yet, because the app has never started and has not applied its migrations.
+# sqlite3 then raised, the command substitution failed, and set -euo pipefail
+# killed step 11 with
+#
+#     sqlite3.OperationalError: unable to open database file
+#
+# which reads as a broken bring-up rather than "there is nothing to wait for".
+# No database, or no jobs table, means no job can be in flight.
+try:
+    db = sqlite3.connect("file:/var/lib/xentry/xentry.db?mode=ro", uri=True)
+    print(db.execute("SELECT COUNT(*) FROM jobs WHERE outcome IS NULL").fetchone()[0])
+except sqlite3.Error:
+    print(0)
 DB
 )
 [ "$inflight" = "0" ] || { echo "  $inflight job(s) running - wait" >&2; exit 1; }

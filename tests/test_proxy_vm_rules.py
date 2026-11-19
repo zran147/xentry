@@ -1755,3 +1755,33 @@ def test_the_target_may_open_a_connection_back_to_the_attacker() -> None:
     # And the isolation that matters is untouched.
     assert "ip saddr ${JOBS} drop" in code
     assert "ip saddr ${JOBS} meta l4proto tcp drop" in code
+
+
+def test_the_bring_up_does_not_need_an_index_to_exist() -> None:
+    """Step 11 died on a fresh host with a sqlite traceback.
+
+    proxy-vm-up.sh opens /var/lib/xentry/xentry.db read-only to refuse while a
+    job is running. The app creates that file and applies its migrations on
+    first start, so on a fresh install - or after a reset that cleared the
+    state - it is not there yet. sqlite3 raised, the command substitution
+    failed, and `set -euo pipefail` ended the step with
+
+        sqlite3.OperationalError: unable to open database file
+
+    which reads as a broken bring-up rather than "there is no job to wait for".
+    No database, and no jobs table, both mean nothing can be in flight.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    up = (root / "scripts/proxy-vm-up.sh").read_text()
+    block = up[up.index("inflight=$("):up.index("job(s) running")]
+    assert "except sqlite3.Error:" in block, "a missing index still raises"
+    assert "print(0)" in block
+
+    # The read-only tool is what you reach for on exactly that host, so it
+    # must say so once rather than traceback from three separate connects.
+    read = (root / "scripts/xentry-read.sh").read_text()
+    assert "need_db()" in read
+    code = "\n".join(l for l in read.splitlines() if not l.strip().startswith("#"))
+    assert code.count("need_db") >= 6, "not every index-reading subcommand guards"
