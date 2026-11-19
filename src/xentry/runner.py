@@ -520,8 +520,15 @@ class JobRunner:
 
         The source job supplies only its target and CVE. Nothing is fetched and
         no bundle is expected: an environment makes no claim about any source,
-        so there is nothing for a byte digest to protect. It gets its own
-        subnet, its own mirror and its own attacker exactly as a job does.
+        so there is nothing for a byte digest to protect.
+
+        It is queued like any other job and takes the same island when its turn
+        comes: 10.43.1.10 for the target, 10.43.2.20 for the attacker, on the
+        proxy VM's bridges. It does NOT get a subnet of its own - that was true
+        when the broker allocated 10.42.N.0/24 per job from an octet pool, a
+        path deleted with the host-side mirrors. One island is enough because
+        the runner is one thread: an environment left running holds it exactly
+        as a held job does, and the next job waits.
         """
         conn = connect(self.db_path)
         try:

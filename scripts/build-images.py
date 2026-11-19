@@ -328,6 +328,24 @@ def build_one(name: str, spec: dict, base: Path, out_dir: Path, work: Path) -> P
     return final
 
 
+def already_built(report_path: Path, name: str, image_dir: Path) -> bool:
+    """Is this image on disk and still the bytes the report recorded?
+
+    The digest, not merely the path: a half-written qcow2 from an interrupted
+    build is present and wrong, and silently keeping it would reproduce a CVE
+    against an image nobody can account for.
+    """
+    final = image_dir / f"{name}.qcow2"
+    if not final.is_file():
+        return False
+    try:
+        images = json.loads(report_path.read_text(encoding="utf-8")).get("images", {})
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    recorded = str((images.get(name) or {}).get("sha256", ""))
+    return len(recorded) == 64 and sha256_file(final) == recorded
+
+
 def record(report_path: Path, name: str, result: dict[str, object]) -> None:
     """Merge one image's result into the build report, keeping the others."""
     images: dict[str, dict[str, object]] = {}
@@ -387,6 +405,16 @@ def main() -> int:
         # Keyed by artifact: three releases have three different base images,
         # and one shared filename would make each build overwrite the last.
         base_path = args.image_dir / f"{spec['base_artifact']}.img"
+        # An image already built and still matching its recorded digest is not
+        # rebuilt. Each one boots a VM and runs apt inside it for about ten
+        # minutes, so re-running install.sh cost an hour whatever had changed -
+        # and against a flaky archive one of the eight would usually fail,
+        # taking the install with it. REBUILD_IMAGES=1 forces them anyway.
+        if not os.environ.get("REBUILD_IMAGES") and already_built(
+            report_path, name, args.image_dir
+        ):
+            print(f"[{name}] already built and verified, not rebuilding")
+            continue
         download(base_spec["url"], base_path, base_spec["sha256"])
         final = build_one(name, spec, base_path, args.image_dir, work)
         # Recorded per image rather than after the loop: build_one raises on a

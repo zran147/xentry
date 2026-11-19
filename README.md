@@ -71,7 +71,7 @@ reading but optional.
 | 2 | users, groups, and directories |
 | 3 | `uv` and a private Python 3.12 under `/opt/uv-python` |
 | 4 | code and the two virtualenvs |
-| 5 | pinned artifacts and the three images |
+| 5 | pinned artifacts and the eight images |
 | 6 | QEMU user and libvirt |
 | 7 | environment files |
 | 8 | systemd units and the services |

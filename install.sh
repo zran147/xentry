@@ -196,7 +196,7 @@ note "Do not put a .env file in $APP; the services read $ETC/app.env and"
 note "$ETC/broker.env."
 
 ################################################################################
-step "pinned artifacts and the three images"
+step "pinned artifacts and the eight images"
 ################################################################################
 
 cd "$APP"

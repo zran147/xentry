@@ -167,3 +167,57 @@ def test_the_image_build_can_be_pointed_at_an_apt_mirror() -> None:
     assert 'os.environ.get("XENTRY_APT_MIRROR"' in code
     assert "sed -Ei" in code, "a basic regex cannot match https?://"
     assert "sed -Ei 's@" in code, "a | delimiter is closed by the alternation"
+
+
+def test_an_image_already_built_and_verified_is_not_rebuilt() -> None:
+    """Every image booted a VM and ran apt in it, every time install.sh ran.
+
+    Eight images at roughly ten minutes each is an hour added to any re-run,
+    whatever changed - and against a degraded archive one of the eight would
+    usually fail and take the install with it. Nothing checked whether the
+    image was already there: only the base image DOWNLOAD was skipped.
+
+    The digest is what makes the skip safe. A path check alone would keep a
+    half-written qcow2 from an interrupted build, and a CVE reproduced against
+    an image nobody can account for is worse than an hour lost.
+    """
+    import hashlib
+    import importlib.util
+    import json
+    import pathlib
+    import tempfile
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "build_images_skip", root / "scripts/build-images.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with tempfile.TemporaryDirectory() as raw:
+        images = pathlib.Path(raw)
+        image = images / "ubuntu-24.04-target.qcow2"
+        image.write_bytes(b"pretend qcow2")
+        report = images / "build-results.json"
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        report.write_text(json.dumps({"images": {"ubuntu-24.04-target": {"sha256": digest}}}))
+
+        assert module.already_built(report, "ubuntu-24.04-target", images)
+
+        # The bytes changed under a digest that still says otherwise.
+        image.write_bytes(b"an interrupted build")
+        assert not module.already_built(report, "ubuntu-24.04-target", images)
+
+        # Present, but never recorded.
+        image.write_bytes(b"pretend qcow2")
+        report.write_text(json.dumps({"images": {}}))
+        assert not module.already_built(report, "ubuntu-24.04-target", images)
+
+        # A corrupt report must not be read as permission to skip.
+        report.write_text("{ not json")
+        assert not module.already_built(report, "ubuntu-24.04-target", images)
+
+    # And there must be a way to force a rebuild anyway.
+    source = (root / "scripts/build-images.py").read_text()
+    assert 'os.environ.get("REBUILD_IMAGES")' in source
