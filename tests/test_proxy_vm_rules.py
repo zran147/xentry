@@ -2029,3 +2029,48 @@ def test_no_silenced_command_substitution_can_kill_a_script() -> None:
         "a silenced command substitution in an assignment can end the script "
         "with no reason given: " + ", ".join(sorted(set(offenders)))
     )
+
+
+def test_uninstall_removes_everything_install_creates() -> None:
+    """The two scripts drift, and only one of them is ever run twice.
+
+    install.sh gained a developer-access step, a webfilter, an AppArmor
+    drop-in, a second virtualenv and a private Python since uninstall.sh was
+    written. Anything it creates that the uninstaller does not name survives a
+    "complete" uninstall and is then inherited by the next install, which is
+    how a host ends up in a state neither script describes.
+
+    This pairs each thing install.sh makes with the token that removes it.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    install = (root / "install.sh").read_text()
+    uninstall = (root / "uninstall.sh").read_text()
+
+    pairs = [
+        ("groupadd -f --system xentry", "groupdel"),
+        ("groupadd -f xentry-dev", "xentry-dev"),
+        ("useradd", "userdel"),
+        ('"$STATE"', "$STATE"),
+        ('"$ETC"', "$ETC"),
+        ("$UVPY", "$UVPY"),
+        ("/etc/systemd/system/xentry.service", "xentry*.service"),
+        ("10-bind.conf", "xentry*.service.d"),
+        ("install-webfilter.sh", "xentry_admin"),
+        ("host-wan.nft", "xentry_wan"),
+        ("install-apparmor.sh", "apparmor.d/local"),
+        ("qemu_conf_set", "qemu.conf.orig"),
+        ("/etc/sudoers.d/xentry-dev", "/etc/sudoers.d/xentry-dev"),
+        ("/etc/sudoers.d/xentry-read", "/etc/sudoers.d/xentry-read"),
+        ("/usr/local/sbin/xentry-read", "/usr/local/sbin/xentry-read"),
+        ("proxy-vm-up.sh", "virsh"),
+        (".venv-broker", "$APP"),
+        ("apt-get install", "apt-mark auto"),
+    ]
+    missing = [
+        f"{made!r} is created but {removed!r} never appears in uninstall.sh"
+        for made, removed in pairs
+        if made in install and removed not in uninstall
+    ]
+    assert not missing, "; ".join(missing)
