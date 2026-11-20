@@ -54,8 +54,9 @@ artifacts:
     url: https://github.com/78ResearchLab/PHP2Shell-Full-Chain-Exploit/archive/167085410a9342fafbd1bd64f5006920dbc83b8e.tar.gz
   ubuntu-attacker-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-attacker; config/image-manifests.yaml
-    sha256: fc2193918fb2b30bc679abaca13ad6348037afff77b6b373f67cb2f0c273b2d2
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: beb5edd5282216cd89d7d7ca57182fe328ebcbc5a6ebc422eeb1fcd3933837a5
     status: resolved
     url: build://ubuntu-base-image+attacker
   ubuntu-base-image:
@@ -72,26 +73,13 @@ artifacts:
     url: https://cloud-images.ubuntu.com/releases/bionic/release-20230607/ubuntu-18.04-server-cloudimg-amd64.img
   ubuntu-dirtyfrag-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-dirtyfrag; config/image-manifests.yaml
-    sha256: a6e5062592246a6e458770b644b4aac4dae0499f22b1c4d6e4f608da6298abf3
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: 6e8af225b6a6cfe08396295ea5418a7e7e32f3a25794bea56467c639c6464797
     status: resolved
     url: build://ubuntu-base-image+dirtyfrag
   ubuntu-focal-base-image:
     kind: image
-    # NOT the release-day build. focal/release-20200423 would align this disk
-    # with the dated release pocket, which is what an early serial needs - but
-    # it does not boot under scripts/build-images.py: the console shows no
-    # initrd= on the kernel command line, so virtio_blk never loads, so the
-    # root disk is absent and 5.4.0-26 panics with
-    #   VFS: Cannot open root device "PARTUUID=..." or unknown-block(0,0)
-    #   available partitions: 0b00 1048575 sr0  driver: sr
-    # The only block device the kernel found was the seed CD-ROM.
-    #
-    # So this stays on a build that boots. The Ubuntu path keeps the mismatch
-    # it had - an installed set newer than any early serial can serve - and
-    # that is why release.RELEASES now tries DEBIAN FIRST: snapshot.debian.org
-    # has the full pocket history and sid is newer than the bullseye base, so
-    # apt only ever upgrades.
     provenance: cloud-images.ubuntu.com, digest from the release SHA256SUMS
     sha256: 18f2977d77dfea1b74aee14533bd21c34f789139e949c57023b7364894b7e5e9
     status: resolved
@@ -99,50 +87,49 @@ artifacts:
   ubuntu-jammy-base-image:
     kind: image
     provenance: https://cloud-images.ubuntu.com/releases/jammy/release-20261106/SHA256SUMS
-    # Reverted with focal: the release-day pin is the right idea and untested
-    # here, because focal's equivalent does not boot and each build is slow.
-    # Worth revisiting if an Ubuntu-only CVE needs a dated lab - CVE-2023-4911
-    # is the live example, where the guest reported "libc6 is already the
-    # newest version (2.35-0ubuntu3.15)" against a plan asking for 2.34, so a
-    # successful install would have tested a PATCHED libc6.
     sha256: f77bc6d59cb8deaa9657095736b5f5003f7705b47055f01823459715c967de6a
     status: resolved
     url: https://cloud-images.ubuntu.com/releases/jammy/release-20261106/ubuntu-22.04-server-cloudimg-amd64.img
   ubuntu-target-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-target; config/image-manifests.yaml;
-      libreadline-dev
-    sha256: 2ef5a4a54a49914c8a903524ababec1ce82cc11a2c588f19dbe96c4df7cd9da1
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: c4c22070f88420e6033417469fed11a0c6365212f00245405a5eefe3120a6eb8
     status: resolved
     url: build://ubuntu-base-image+target
   debian-11-generic-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only debian-11-generic; config/image-manifests.yaml
-    sha256: 561a1122a41621515ceab59ea8ecde663df7d0473fc4b7bb68fa49dd27156c9d
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: 889b0f539d7391e71de79dd628c6baf5ce0cb5419792309f18b5584e35994d74
     status: resolved
     url: build://debian-11-base-image+generic
   ubuntu-bionic-generic-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-18.04-generic; config/image-manifests.yaml
-    sha256: 2e4156c5e57fa5b1c196e09dc5fda57e3046143e379de2b3b9575be5562df3c0
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: 141652ba9c07feae59ff8beb07baa39deb2a1637a6c8c24282f80505c97fce5e
     status: resolved
     url: build://ubuntu-bionic-base-image+generic
   ubuntu-focal-generic-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-20.04-generic; config/image-manifests.yaml
-    sha256: ab82904bedb37f38bba1ef9e4a19d88574f7f172322ea11058740fae9db5560e
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: d72dfd3dfbd7c4da8dcded3db0543b02469c18c10b08b69973e2663ce768590d
     status: resolved
     url: build://ubuntu-focal-base-image+generic
   ubuntu-generic-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-24.04-generic; config/image-manifests.yaml
-    sha256: c298c5e5b3a08c206e7d8c79e848d5623d6f28c5b43f4d151cd3152522b99297
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: 219e2aa6e36f79a34d4aa063b155cc545363489cd38c7ddf864a62922714b06f
     status: resolved
     url: build://ubuntu-base-image+generic
   ubuntu-jammy-generic-image:
     kind: image
-    provenance: scripts/build-images.sh --execute --only ubuntu-22.04-generic; config/image-manifests.yaml
-    sha256: 5c79519bbd0868258ddd181d19a867ae3d11d6cfd741781b2c97967114facb49
+    provenance: built on this host by scripts/build-images.sh from the pinned base
+      and config/image-manifests.yaml; build-results.json 2026-11-20T04:03:06.603811+00:00
+    sha256: b28e5bcf56eb4ce0f55438fd067f7e562f7243f3a0d159dd433be119fdf0253a
     status: resolved
     url: build://ubuntu-jammy-base-image+generic
 version: 1
