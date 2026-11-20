@@ -81,7 +81,7 @@ fi
 say "5c. can the qemu user actually reach the disk?"
 echo "    the run directory and its contents:"
 ls -la "$RUN" 2>/dev/null | sed 's/^/      /' || echo "      $RUN does not exist"
-owner=$(ls -1 /var/lib/xentry/images/*-generic.qcow2 2>/dev/null | head -1)
+owner=$(ls -1 /var/lib/xentry/images/*-generic.qcow2 2>/dev/null | head -1 || true)
 if [ -n "$owner" ]; then
   echo "    an image libvirt already opens is owned by $(stat -c %U:%G "$owner") ($(stat -c %u:%g "$owner"))"
   echo "    $RUN is owned by $(stat -c %U:%G "$RUN" 2>/dev/null) mode $(stat -c %a "$RUN" 2>/dev/null)"

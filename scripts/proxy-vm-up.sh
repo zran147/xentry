@@ -139,7 +139,7 @@ for envfile in /etc/xentry/broker.env /etc/xentry/app.env; do
 done
 if [ -z "$QEMU_OWNER" ]; then
   # The images libvirt already opens are the best available evidence.
-  probe=$(ls -1 "$IMAGES"/*-generic.qcow2 2>/dev/null | head -1)
+  probe=$(ls -1 "$IMAGES"/*-generic.qcow2 2>/dev/null | head -1 || true)
   if [ -n "$probe" ]; then
     QEMU_OWNER="$(stat -c %u:%g "$probe")"
     SOURCE="the owner of $(basename "$probe")"
@@ -282,7 +282,7 @@ PYX
   echo "    $2 forward_delay=$fd (0 means a new port forwards at once)"
 done
 for b in "$TBRIDGE" "$ABRIDGE"; do
-  addr=$(ip -4 -o addr show "$b" 2>/dev/null | awk '{print $4}')
+  addr=$(ip -4 -o addr show "$b" 2>/dev/null | awk '{print $4}' || true)
   if [ -n "$addr" ]; then
     echo "  $b HAS an address on this host ($addr) - stage 2 is not met" >&2
     exit 1
@@ -299,8 +299,24 @@ if [ -f "$RUN/$VM.qcow2" ] && [ "${REBUILD:-0}" != "1" ]; then
   # script is backed by whatever BASE said then, so changing BASE here
   # does nothing until the disk is rebuilt. Say so rather than imply the
   # current BASE is in use.
-  backing=$(qemu-img info "$RUN/$VM.qcow2" 2>/dev/null \
-            | sed -n "s/^backing file: //p" | head -1)
+  # -U, and a reported failure rather than a silent one.
+  #
+  # qemu-img info takes a lock on the image, so it FAILS while a VM
+  # holds the disk - the normal case in this branch, because this
+  # branch IS "the disk exists and we are keeping it". Under
+  # set -euo pipefail the assignment then killed the script right
+  # after printing "exists, keeping it", saying nothing about why.
+  # -U reads the metadata without competing for the lock.
+  info=$(qemu-img info -U "$RUN/$VM.qcow2" 2>&1) || {
+    echo "  qemu-img could not read the disk:" >&2
+    printf '%s\n' "$info" | sed 's/^/    /' >&2
+    echo "  The file is there but unreadable. If a VM still holds it:" >&2
+    echo "    sudo virsh destroy $VM" >&2
+    echo "  or discard it and build a fresh one:" >&2
+    echo "    sudo REBUILD=1 \$0" >&2
+    exit 1
+  }
+  backing=$(printf '%s\n' "$info" | sed -n "s/^backing file: //p" | head -1 || true)
   echo "  backed by: ${backing:-(none)}"
   case "$backing" in
     *"$BASE") : ;;
@@ -343,11 +359,11 @@ else
     | sed 's/^/    /'
 
   # And verify the overlay that came out, rather than trusting the create.
-  got=$(qemu-img info --output=json "$RUN/$VM.qcow2" \
+  got=$(qemu-img info -U --output=json "$RUN/$VM.qcow2" \
         | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('backing-filename-format',''))" 2>/dev/null)
   if [ "$got" != "$fmt" ]; then
     echo "  the overlay records its backing format as \"$got\", not \"$fmt\"" >&2
-    qemu-img info "$RUN/$VM.qcow2" | sed 's/^/    /' >&2
+    qemu-img info -U "$RUN/$VM.qcow2" | sed 's/^/    /' >&2
     exit 1
   fi
   qemu-img check "$RUN/$VM.qcow2" >/dev/null 2>&1 \
@@ -560,7 +576,7 @@ echo "=== waiting for cloud-init to finish"
 # race, not a missing package list.
 if $SSH "command -v cloud-init >/dev/null" 2>/dev/null; then
   $SSH "cloud-init status --wait" 2>&1 | tail -3 | sed 's/^/    /' || true
-  status=$($SSH "cloud-init status" 2>/dev/null | head -1)
+  status=$($SSH "cloud-init status" 2>/dev/null | head -1 || true)
   echo "  $status"
   case "$status" in
     *done*) : ;;

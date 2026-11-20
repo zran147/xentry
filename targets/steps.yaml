@@ -359,7 +359,7 @@ steps:
     - suite
     - sources_format
     script: common/setup-generic.sh
-    sha256: 3d163a01bc5d07472778d50572c420f66bc9930d8a6018e23c3eaa52da5618c8
+    sha256: 863a212562cf6945669dd3e80e6cfa74b0ec8f699333bd5467a2d5bc7be690dc
     timeout_s: 1800
     tty: false
     user: root
@@ -424,7 +424,7 @@ steps:
     - suite
     - sources_format
     script: common/setup-generic.sh
-    sha256: 3d163a01bc5d07472778d50572c420f66bc9930d8a6018e23c3eaa52da5618c8
+    sha256: 863a212562cf6945669dd3e80e6cfa74b0ec8f699333bd5467a2d5bc7be690dc
     timeout_s: 1800
     tty: false
     user: root

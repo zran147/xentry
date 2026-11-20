@@ -1946,3 +1946,86 @@ def test_dev_access_does_not_strip_the_executable_bit() -> None:
         if p.stat().st_mode & 0o111
     ]
     assert executable, "no target script is executable; the bit was stripped"
+
+
+def test_the_bring_up_reads_a_disk_a_vm_may_be_holding() -> None:
+    """The run stopped after "exists, keeping it" and said nothing.
+
+    qemu-img info takes a lock on the image, so it fails while a VM holds the
+    disk. That is the normal case in the branch that reads it, because the
+    branch IS "the disk exists and we are keeping it" - and a kept disk often
+    belongs to a VM that is still defined and running. Under
+    `set -euo pipefail` the assignment died and took the script with it,
+    immediately after the line that says the disk is being kept.
+
+    -U reads the metadata without competing for the lock. Every read of the
+    VM's own disk needs it; reads of the pristine base image do not, because
+    nothing holds that.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    up = (root / "scripts/proxy-vm-up.sh").read_text()
+    code = "\n".join(l for l in up.splitlines() if not l.strip().startswith("#"))
+
+    for match in re.finditer(r'qemu-img info([^\n]*?)"\$RUN/\$VM\.qcow2"', code):
+        assert "-U" in match.group(1), (
+            "a read of the VM's own disk without -U: it fails while a VM holds it"
+        )
+    assert code.count('qemu-img info -U "$RUN/$VM.qcow2"') >= 2
+
+    # And the first one reports rather than dying silently.
+    assert 'qemu-img could not read the disk:' in code
+    assert "sudo virsh destroy" in code
+
+
+def test_no_silenced_command_substitution_can_kill_a_script() -> None:
+    """`x=$(cmd 2>/dev/null)` under set -euo pipefail is the worst shape.
+
+    The assignment's status is the command's, so a failure ends the script -
+    and 2>/dev/null has already thrown away the reason. The run stops with
+    nothing printed after whatever line came before it.
+
+    That is how the proxy VM bring-up stopped one line after announcing it was
+    keeping the existing disk: qemu-img info takes a lock and fails while a VM
+    holds the image, and its complaint went to /dev/null.
+
+    Six more had the same shape, every one on a path a fresh install reaches:
+    globs for images that do not exist yet (`ls -1 ... *-generic.qcow2`), an
+    interface that is not up yet (`ip -4 -o addr show`), ssh to a guest that
+    is still booting (`cloud-init status`), `hostname -I` before DHCP, and a
+    `find` over directories it may not be able to read.
+
+    `|| true` inside the substitution keeps whatever output there was and
+    discards only the status, which is what silencing stderr already implied.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    files = sorted(
+        set(root.glob("*.sh")) | set(root.glob("scripts/*.sh"))
+        | set(root.glob("deploy/**/*.sh")) | set(root.glob("targets/**/*.sh"))
+    )
+    sub = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)")
+    offenders: list[str] = []
+    for path in files:
+        text = path.read_text()
+        if "pipefail" not in text and "set -e" not in text:
+            continue
+        joined = re.sub(r"\\\n\s*", " ", text)
+        for number, raw in enumerate(joined.splitlines(), 1):
+            line = raw.strip()
+            if line.startswith("#") or "2>/dev/null" not in line:
+                continue
+            if not re.match(r"^(local\s+)?[A-Za-z_][A-Za-z_0-9]*=", line):
+                continue
+            for match in sub.finditer(line):
+                body = match.group(0)
+                if "2>/dev/null" in body and "||" not in body:
+                    offenders.append(f"{path.relative_to(root)}:{number}")
+    assert not offenders, (
+        "a silenced command substitution in an assignment can end the script "
+        "with no reason given: " + ", ".join(sorted(set(offenders)))
+    )

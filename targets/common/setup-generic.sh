@@ -475,7 +475,7 @@ if [ -n "$artifacts" ]; then
       tomcat-webapp)
         # tomcat9 on jammy and focal, tomcat10 on noble: whichever is here.
         webapps=$(find /var/lib -maxdepth 2 -type d -name webapps 2>/dev/null \
-          | sort | head -1)
+          | sort | head -1 || true)
         [ -n "$webapps" ] || {
           echo "no tomcat webapps directory: is tomcat in the package list?" >&2
           exit 1; }
@@ -645,7 +645,7 @@ for port in $ports; do
         #
         # Nothing here comes from a model: the port list is validated above,
         # the address is the guest's own, and this script is pinned by digest.
-        guest_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        guest_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
         if [ -n "$guest_ip" ] && command -v socat >/dev/null 2>&1 \
             && [[ "$guest_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
           echo "port $port is loopback-only; publishing it on $guest_ip"
