@@ -13,10 +13,49 @@
 # affected build is listening". Without it a derived job proves only that a
 # PoC printed a nonce against some version of something.
 set -euo pipefail
+
+# AN ADVISORY NAMES ITS RANGE PER BRANCH, AND ONE VERSION CANNOT CARRY THAT.
+#
+# CVE-2025-32433 is affected in three disjoint branches:
+#
+#   >= OTP-27.0-rc1, < OTP-27.3.3
+#   >= OTP-26.0-rc1, < OTP-26.2.5.11
+#   < OTP-25.3.2.20
+#
+# resolve() collapses them to the lowest bound - 25.3.2 - and the prefix test
+# below then rejected the installed 1:27.3.2+dfsg-1, which the FIRST branch
+# plainly covers. The job provisioned a genuinely vulnerable target, spent a
+# VM and eight minutes on it, and reported target_unhealthy. A false negative
+# reads exactly like an unexploitable build.
+#
+# $ranges is "floor:ceiling:ceiling_itself_affected", space separated, an empty
+# floor meaning no lower bound. dpkg does the comparing because it is the
+# archive's own version ordering and it is already in the guest.
+branch_match() {
+  local v="$1" spec="$2" branch floor ceiling inclusive rest
+  for branch in $spec; do
+    floor="${branch%%:*}"
+    rest="${branch#*:}"
+    ceiling="${rest%%:*}"
+    inclusive="${branch##*:}"
+    [ -n "$ceiling" ] || continue
+    if [ -n "$floor" ] && ! dpkg --compare-versions "$v" ge "$floor"; then
+      continue
+    fi
+    if dpkg --compare-versions "$v" lt "$ceiling"; then
+      return 0
+    fi
+    if [ "$inclusive" = 1 ] && dpkg --compare-versions "$v" eq "$ceiling"; then
+      return 0
+    fi
+  done
+  return 1
+}
 ports="${1:?ports}"
 package="${2-}"
 expected="${3-}"
 cve_id="${4-}"
+ranges="${5-}"
 
 # Does the installed build already carry the fix for THIS CVE? Debian and
 # Ubuntu cite the CVE id in the changelog entry of the update that fixed it,
@@ -64,6 +103,17 @@ if [ -n "$package" ] && [ -n "$expected" ]; then
   # Compare against the upstream part: the advisory never carries a Debian
   # epoch or a packaging suffix.
   upstream="${installed#*:}"
+  if [ -n "$ranges" ]; then
+    [[ "$ranges" =~ ^[0-9A-Za-z.:+~\ -]*$ ]] || { echo "bad affected_ranges" >&2; exit 2; }
+    if branch_match "$upstream" "$ranges"; then
+      printf '%s=%s is inside an affected branch of: %s\n' \
+        "$package" "$installed" "$ranges"
+    else
+      echo "installed $package $installed is in no affected branch of:" >&2
+      echo "  $ranges" >&2
+      exit 1
+    fi
+  else
   case "$upstream" in
     # "$expected"[a-z]* is the UPSTREAM PATCH LEVEL, and without it this
     # check rejected the build it was asked to confirm: sudo CVE-2023-22809
@@ -76,6 +126,7 @@ if [ -n "$package" ] && [ -n "$expected" ]; then
     *) echo "installed $package $installed does not match $expected" >&2; exit 1 ;;
   esac
   printf '%s=%s matches %s\n' "$package" "$installed" "$expected"
+  fi
 fi
 
 deadline=$((SECONDS + 300))

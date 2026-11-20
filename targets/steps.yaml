@@ -143,10 +143,11 @@ steps:
     - package
     - expected_version
     - cve_id
+    - affected_ranges
     required:
     - ports
     script: common/readiness-generic.sh
-    sha256: e422ba6f1b77d739734a1a842e2739d75439edb57040d956a6b0013a531dd4e8
+    sha256: d01e1e0081cfaca4b20e7b2fe2ac75d0072b48d2a2762883f468d4d7259f31bb
     timeout_s: 600
     tty: false
     user: xentry-guest

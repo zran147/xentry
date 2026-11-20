@@ -1577,7 +1577,24 @@ class JobRunner:
                     "package": package,
                     "expected_version": target.expected_version,
                     "cve_id": target.cve_ids[0] if target.cve_ids else "",
+                    # Every branch the advisory marks affected, not just the one
+                    # resolve() chose. It collapses a multi-branch range to its
+                    # lowest bound, so CVE-2025-32433 - affected below 27.3.3,
+                    # 26.2.5.11 AND 25.3.2.20 - reduced to "25.3.2" and readiness
+                    # rejected the installed 27.3.2 that the first branch covers.
                 }
+                # Omitted entirely for a single-branch advisory rather than sent
+                # empty: validate_params fills a missing param with "", so the
+                # script sees the same argument either way, and every existing
+                # caller's parameter set is unchanged.
+                branches = " ".join(
+                    f"{floor}:{ceiling}:{1 if inclusive else 0}"
+                    for floor, ceiling, inclusive in release.segments(
+                        getattr(derived_facts, "affected_range", "") or ""
+                    )
+                )
+                if branches:
+                    common["affected_ranges"] = branches
                 if target.poc_context == "local":
                     # No ports: nothing listens for a local PoC, and
                     # readiness-local checks the evidence channel is shut to

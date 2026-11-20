@@ -172,6 +172,15 @@ XENTRY_POC_ATTEMPTS=3
 `llama.cpp` ignores the key but litellm requires one to be present. Leaving
 `XENTRY_POC_MODEL` empty disables the tab, which is a valid state.
 
+**`XENTRY_HOLD_S` keeps the VMs up after a job**, so you can log into one and
+look at what the exploit did. Unset or `0` destroys them as soon as the PoC
+finishes, which is the default and the reason a completed job leaves nothing to
+inspect. A negative value holds until you release the job from the UI, with no
+deadline; a positive one holds for that many seconds. The hold sits before
+teardown and validation, so the verdict is still produced from recorded
+evidence. It blocks the single runner thread, so a held job parks the queue —
+which is deliberate: nothing reclaims the host but a person.
+
 Two optional API keys raise rate limits, and each is sent only to its own
 host, checked at every redirect hop. `XENTRY_NVD_API_KEY` takes NVD from 5
 requests per 30 seconds to 50. `XENTRY_GITHUB_TOKEN` matters more: GitHub

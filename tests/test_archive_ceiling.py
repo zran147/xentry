@@ -1107,3 +1107,52 @@ def test_the_verdict_keeps_its_own_reasoning() -> None:
     ):
         assert kind in schema, kind
         assert len(kind.split("_")) == 3, kind
+
+
+def test_every_affected_branch_reaches_readiness() -> None:
+    """segments() existed, was tested, and nothing used it.
+
+    CVE-2025-32433 is affected in three disjoint branches - below OTP-27.3.3,
+    below 26.2.5.11, and below 25.3.2.20. resolve() collapses that to the
+    lowest bound, so the plan carried "25.3.2" and readiness-generic.sh
+    prefix-matched the installed 1:27.3.2+dfsg-1 against it and failed the job
+    `target_unhealthy`. 27.3.2 is below 27.3.3, so the target was genuinely
+    vulnerable: the run spent a VM to reach a false negative, which reads
+    exactly like an unexploitable build.
+
+    segments() already answered this - it was written for redis
+    CVE-2024-31449, the same shape - but only tests called it. This asserts the
+    wiring: the runner encodes every branch, steps.yaml accepts the parameter,
+    and the script compares against all of them.
+    """
+    import pathlib
+    import re
+
+    from xentry import release
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+
+    # The encoding the script parses: floor:ceiling:ceiling_itself_affected.
+    branches = release.segments(
+        ">= OTP-27.0-rc1, < OTP-27.3.3; >= OTP-26.0-rc1, < OTP-26.2.5.11"
+    )
+    assert len(branches) == 2, branches
+    encoded = " ".join(f"{f}:{c}:{1 if inc else 0}" for f, c, inc in branches)
+    assert "27.3.3" in encoded and "26.2.5.11" in encoded
+
+    runner = (root / "src/xentry/runner.py").read_text()
+    assert "release.segments(" in runner, "the runner never asks for the branches"
+    assert 'common["affected_ranges"] = branches' in runner
+
+    # Declared, or the broker refuses the step with "unknown step params".
+    steps = (root / "targets/steps.yaml").read_text()
+    block = steps[steps.index("  readiness-generic:"):][:400]
+    assert "- affected_ranges" in block, "steps.yaml does not accept it"
+
+    # And the script prefers the branches, keeping the prefix test for the
+    # Debian patch-level case it was written for (sudo 1.9.12 vs 1.9.12p1-1).
+    script = (root / "targets/common/readiness-generic.sh").read_text()
+    assert "branch_match" in script
+    assert "dpkg --compare-versions" in script
+    assert '"$expected"[a-z]*' in script, "the patch-level case was dropped"
+    assert re.search(r'ranges="\$\{5-\}"', script), "the parameter is not read"
