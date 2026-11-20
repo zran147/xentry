@@ -1698,16 +1698,35 @@ def test_the_host_no_longer_runs_any_package_service() -> None:
 
 
 def test_the_artifact_mirror_module_is_gone() -> None:
-    """broker/mirror.py served pinned artifacts from this host to a guest.
+    """broker/mirror.py is deleted, and that leaves a KNOWN GAP.
 
-    It bound each job network's gateway - the host's own address on that
-    bridge - which is the shape ADR 0002 exists to remove: a guest fetching a
-    package opened a connection to a root process on the orchestrator. The
-    proxy VM serves them now, and the only caller was behind
-    `start_mirror and not self.proxy_ip`, which could not be true.
+    I removed it as dead code and described it as a second implementation of
+    something the proxy VM already did. The first half was right - its only
+    caller was behind `start_mirror and not self.proxy_ip`, and proxy_ip
+    defaults to 10.44.0.2, so it could never run. The second half was wrong.
 
-    Its 114 lines and its tests went with it. This asserts the module does not
-    quietly return, because a second way to serve artifacts is worse than one.
+    It was not a duplicate. It was the ORIGINAL of a service that never moved
+    into the VM. deploy/proxy-vm/serve.py binds five ports - three apt, one
+    registry, one OCI - and nothing on 8081, which is where
+    targets/*/setup.sh fetches pinned software from:
+
+        curl -fsS "$proxy_url/artifacts/$artifact_id" -o "$tarball"
+
+    So every typed target (php2shell, gitlab, dirtyfrag) fails at provision
+    with `curl: (7) Failed to connect to 10.44.0.2 port 8081`, and has done
+    since the ADR 0002 cutover - not since this deletion. Generic targets are
+    unaffected: they fetch from the apt proxy on 8082, which is why
+    CVE-2021-41773 and CVE-2025-32463 still reproduce.
+
+    The decision on record is that generic is the path forward, so this is
+    documented rather than rebuilt. See docs/security/permission_changes.md's
+    sibling note in docs/designs/proxy-vm-isolation.md. If a typed target is
+    ever needed again, the module is at `git show 25a8997~1:broker/mirror.py`
+    and the work is a sixth service in serve.py plus a per-job copy of the
+    approved artifacts into the VM.
+
+    This test asserts the module stays gone, so nobody reintroduces the
+    host-side version by accident - the fix belongs in the VM.
     """
     import pathlib
 

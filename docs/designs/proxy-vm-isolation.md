@@ -158,3 +158,47 @@ install anything, which is loud. So the first thing built is a test that
 asserts, from the proxy VM, that `192.168.137.10` and `192.168.136.1` are
 unreachable on every port, and that the internet is reachable - run as a job
 step, not as a one-off.
+
+## Known gap: the typed targets cannot provision
+
+The three typed targets — PHP2Shell, GitLab, Dirty Frag — fetch their pinned
+software from an **artifact mirror** on port 8081:
+
+```bash
+# targets/php2shell/setup.sh
+curl -fsS "$proxy_url/artifacts/$artifact_id" -o "$tarball"
+```
+
+`deploy/proxy-vm/serve.py` binds five ports: three apt proxies, a registry and
+an OCI mirror. **Nothing binds 8081.** That service, `broker/mirror.py`'s
+`ArtifactMirror`, is the one thing ADR 0002 did not move into the VM. Its
+host-side instance was gated behind `start_mirror and not self.proxy_ip`, and
+`proxy_ip` defaults to the constant `10.44.0.2`, so it could not run either.
+
+So all three fail at provision with
+
+```
+curl: (7) Failed to connect to 10.44.0.2 port 8081
+```
+
+and have since the cutover. It stayed hidden because nothing else uses that
+port: generic targets fetch from the apt proxy on 8082, which is why
+CVE-2021-41773 and CVE-2025-32463 reproduce end to end today.
+
+**This is documented rather than fixed, deliberately.** Generic is the path
+forward; the typed targets are pinned to three specific CVEs and the generic
+pipeline covers the same ground. The dead host-side module was deleted on
+2026-11-20 and a test asserts it stays deleted, because reintroducing it would
+put a root process back on a guest-reachable address — the shape ADR 0002
+exists to remove.
+
+If a typed target is needed again, the work is:
+
+1. A sixth service in `serve.py` on 8081, serving `/artifacts/<id>` with the
+   same allowlist-by-digest behaviour the old module had. It is recoverable
+   from `git show 25a8997~1:broker/mirror.py`.
+2. A per-job copy of only the APPROVED artifacts into the VM, because they
+   live on the host at `/var/lib/xentry/artifacts` and the guest cannot reach
+   the host by design. Per-job and approved-only, not the whole 1.3G set — the
+   allowlist is what stops a guest pulling an artifact from another job.
+3. `job.json` gaining the artifact list, as it already carries the ports.
