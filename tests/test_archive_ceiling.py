@@ -1156,3 +1156,115 @@ def test_every_affected_branch_reaches_readiness() -> None:
     assert "dpkg --compare-versions" in script
     assert '"$expected"[a-z]*' in script, "the patch-level case was dropped"
     assert re.search(r'ranges="\$\{5-\}"', script), "the parameter is not read"
+
+
+def test_a_floorless_ceiling_is_its_own_branch() -> None:
+    """A branch with no lower bound was dropped, costing a whole range.
+
+    CVE-2025-32433 reads
+
+        ">= OTP-27.0-rc1, < OTP-27.3.3; >= OTP-26.0-rc1, < OTP-26.2.5.11;
+         < OTP-25.3.2.20"
+
+    and the third branch - every OTP below 25.3.2.20 - has no floor to pair
+    with. segments() required two version tokens per segment, so it returned
+    two branches and a 25.x install matched none of them.
+
+    "before A, B and C" has the same shape from the other direction: the
+    relation word appears once and the later items inherit it, so each item was
+    a single-token segment and the whole range parsed to nothing.
+
+    A bare list is deliberately still refused: "25.3.2.20, 26.2.5.11, 27.3.3"
+    is as likely to name the FIXED versions as the affected ones, and guessing
+    would turn an unparsed range into a wrong one.
+    """
+    from xentry import release
+
+    three = release.segments(
+        ">= OTP-27.0-rc1, < OTP-27.3.3; >= OTP-26.0-rc1, < OTP-26.2.5.11; "
+        "< OTP-25.3.2.20"
+    )
+    assert len(three) == 3, three
+    assert ("", "25.3.2.20", False) in three
+
+    listed = release.segments("before 25.3.2.20, 26.2.5.11 and 27.3.3")
+    assert len(listed) == 3, listed
+    assert all(floor == "" for floor, _, _ in listed)
+
+    # No relation word anywhere: left alone rather than guessed at.
+    assert release.segments("25.3.2.20, 26.2.5.11, 27.3.3") == ()
+
+    # And every existing shape is unchanged.
+    assert len(release.segments(">= 2.6, < 6.2.16; >= 7.0.0, < 7.2.6")) == 2
+    assert release.segments("1.30.0 before 1.30.2") == ()
+    assert release.segments("< 27.3.3") == ()
+    assert release.segments("2.4.51") == ()
+    assert release.segments("") == ()
+
+
+def test_a_poc_that_dials_loopback_is_not_a_failed_exploit() -> None:
+    """exploit_failed blamed the CVE for a PoC that never reached the target.
+
+    redis CVE-2024-31449's PoC takes an address as argv[1], was handed
+    10.43.1.10, and called remote("localhost", 6379) - it is written to run ON
+    the vulnerable host. The step before had already proved 10.43.1.10:6379
+    accepts a connection from the attacker, so the system knew the target was
+    reachable and still reported exploit_failed, which reads as "the exploit
+    did not work here".
+
+    One is a statement about the CVE and the other about the PoC. Re-running
+    cannot change the second, and neither can anything done to the target.
+    """
+    from xentry.runner import POC_DIALLED_LOOPBACK
+
+    dialled_loopback = (
+        "reachable: 10.43.1.10:6379 accepted a connection from here\n"
+        "invoking: ./PoC.py 10.43.1.10 6379 /var/lib/xentry/nonce\n"
+        "[x] Opening connection to localhost on port 6379\n"
+        "[ERROR] Could not connect to localhost on port 6379"
+    )
+    assert POC_DIALLED_LOOPBACK.search(dialled_loopback)
+
+    # Reached the target and failed there: that IS exploit_failed.
+    reached_target = (
+        "[*] Target: 10.43.1.10:22\n[*] Connecting to target...\n"
+        "[+] Received banner: SSH-2.0-OpenSSH_10.0p2\n"
+    )
+    assert not POC_DIALLED_LOOPBACK.search(reached_target)
+    assert not POC_DIALLED_LOOPBACK.search("[*] Connecting to 10.43.1.10:6379")
+
+    # The runner has to choose between them, not hardcode one.
+    import pathlib
+
+    runner = (pathlib.Path(__file__).resolve().parents[1] / "src/xentry/runner.py").read_text()
+    assert '"poc_ignored_target"' in runner
+    assert "POC_DIALLED_LOOPBACK.search(attacker_transcript)" in runner
+
+
+def test_install_seeds_every_template_key_into_an_existing_env() -> None:
+    """A variable added to .env.example never reached an existing app.env.
+
+    Step 7 copies the template only when app.env does NOT exist; otherwise it
+    rewrites a named list of paths. XENTRY_HOLD_S went into the template after
+    this host's app.env had been written, so the variable the docs described
+    was absent from the file you would look in, and "why was no VM held" had no
+    answer there.
+
+    A loop over the template's keys makes the class disappear instead of
+    handling each one as it is discovered. env_default writes only when a key
+    is missing or empty, and it runs after the explicit env_set calls, so a
+    computed path still wins and a chosen value is never touched.
+    """
+    import pathlib
+
+    install = (
+        pathlib.Path(__file__).resolve().parents[1] / "install.sh"
+    ).read_text()
+    code = "\n".join(l for l in install.splitlines() if not l.strip().startswith("#"))
+
+    assert "while IFS='=' read -r key val; do" in code
+    assert 'env_default "$ETC/app.env" "$key" "$val"' in code
+    assert "grep -E '^[A-Z][A-Z0-9_]*=' \"$APP/.env.example\"" in code
+    # The loop replaces the per-variable lines; a named XENTRY_HOLD_S default
+    # would mean the general fix was abandoned for a specific one.
+    assert 'env_default "$ETC/app.env" XENTRY_HOLD_S' not in code

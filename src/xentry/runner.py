@@ -85,6 +85,23 @@ PANIC_MARKS = (
 # How many revert-and-rebuild verifications one harness job may pay for. A
 # settings page owns this later; three is enough to see a model converge and
 # few enough that a wrong one costs minutes rather than an afternoon.
+# A PoC THAT DIALS LOOPBACK WAS NEVER POINTED AT THE TARGET.
+#
+# redis CVE-2024-31449's PoC takes an address as argv[1], is handed the
+# target's, and calls remote("localhost", 6379) anyway - it is written to run
+# ON the vulnerable host. The attacker VM runs nothing on loopback, so the
+# connection is refused and the job reported exploit_failed, which reads as
+# "the exploit did not work against this target". It never reached the target:
+# the step before it had already proved 10.43.1.10:6379 accepts a connection.
+#
+# The distinction matters when the report is read later. exploit_failed is a
+# statement about the CVE; this is a statement about the PoC. Re-running cannot
+# change it and neither can anything done to the target.
+POC_DIALLED_LOOPBACK = re.compile(
+    r"(?:connect\w*|connection)\b[^\n]{0,48}?\b(?:localhost|127\.0\.0\.1|::1)\b",
+    re.IGNORECASE,
+)
+
 HARNESS_READINESS_CALLS = 3
 
 
@@ -2621,7 +2638,13 @@ class JobRunner:
                 real_observed = real_nonce in raw_output
                 attacker_transcript = redact(raw_output, [real_nonce])
                 if result["exit_code"] != 0:
-                    raise RunnerFailure("exploit_failed", attacker_transcript[-2000:])
+                    # Which of the two it is, from what the PoC said it did.
+                    reason = (
+                        "poc_ignored_target"
+                        if POC_DIALLED_LOOPBACK.search(attacker_transcript)
+                        else "exploit_failed"
+                    )
+                    raise RunnerFailure(reason, attacker_transcript[-2000:])
                 return result
 
             def rebuild_poc() -> None:

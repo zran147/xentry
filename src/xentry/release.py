@@ -398,9 +398,36 @@ def segments(affected_range: str) -> tuple[tuple[str, str, bool], ...]:
     Empty for a single-segment range, which keeps every existing caller on the
     upper_bound path: this answers only the question that path cannot.
     """
+    # A segment with ONE version is a ceiling with no floor, and dropping it
+    # cost a whole affected branch. CVE-2025-32433 reads
+    #   ">= OTP-27.0-rc1, < OTP-27.3.3; >= OTP-26.0-rc1, < OTP-26.2.5.11;
+    #    < OTP-25.3.2.20"
+    # and the third branch - every OTP below 25.3.2.20 - has no lower bound to
+    # pair with, so it was skipped and a 25.x install matched nothing.
+    #
+    # The strictness of a floorless ceiling comes from the whole string when its
+    # own segment carries no relation word, because "before A, B and C" states
+    # the relation once and the later items inherit it. A bare list with no
+    # relation word anywhere is left alone: "25.3.2.20, 26.2.5.11, 27.3.3" is as
+    # likely to be the FIXED versions as the affected ones, and guessing which
+    # would turn an unparsed range into a wrong one.
+    whole = (affected_range or "").lower()
+    whole_strict = ("<" in whole and "<=" not in whole) or any(
+        word in whole for word in STRICT_WORDS
+    )
     found = []
     for part in SEGMENT_SPLIT.split(affected_range or ""):
         tokens = VERSION_RE.findall(part)
+        if len(tokens) == 1:
+            lowered_one = part.lower()
+            before_token = lowered_one.rsplit(tokens[0].lower(), 1)[0]
+            own = ("<" in before_token and "=" not in before_token) or any(
+                word in before_token for word in STRICT_WORDS
+            )
+            if not own and not whole_strict:
+                continue
+            found.append(("", tokens[0], False))
+            continue
         if len(tokens) < 2:
             continue
         # Only the words BETWEEN the two versions, which is what upper_bound

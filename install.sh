@@ -326,6 +326,27 @@ env_set "$ETC/app.env" XENTRY_STEPS_MANIFEST "$APP/targets/steps.yaml"
 env_set "$ETC/app.env" XENTRY_TARGETS_DIR "$APP/targets"
 env_default "$ETC/app.env" XENTRY_ALLOWED_HOSTS localhost,127.0.0.1
 
+# EVERY KEY THE TEMPLATE HAS, rather than a list maintained here.
+#
+# app.env is copied from .env.example only when it does NOT already exist, and
+# otherwise just has the paths above rewritten. So a variable added to the
+# template later never reaches a host that already has the file: it is
+# documented and absent, and the symptom is something silently not happening.
+#
+# XENTRY_HOLD_S was found exactly that way. It went into .env.example after
+# this host's app.env had been created, so "why was no VM held" had no answer
+# in the file you would look in - the variable the docs described was not
+# there. Adding it as one more line here would have fixed that one variable
+# and left the next to be discovered the same way.
+#
+# env_default writes only when a key is missing or empty, and this runs AFTER
+# the env_set calls above, so a path this script computes still wins and a
+# value you chose is never touched.
+while IFS='=' read -r key val; do
+	[ -n "$key" ] || continue
+	env_default "$ETC/app.env" "$key" "$val"
+done < <(grep -E '^[A-Z][A-Z0-9_]*=' "$APP/.env.example")
+
 if [ -e "$ETC/broker.env" ]; then
 	note "$ETC/broker.env exists; left as it is"
 	grep -nE '^XENTRY_PROXY_IP=' "$ETC/broker.env" || true
